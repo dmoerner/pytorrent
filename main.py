@@ -1,4 +1,5 @@
 import bencoder
+import math
 import ipaddress
 import socket
 import struct
@@ -76,6 +77,12 @@ def handle_data(value_t, payload=b""):
 
 
 """
+torrent file: "length" means total size of data
+so pieces count = length / piece length
+
+BUT, in the messages that we send to a peer: "length" means the length
+of a block of a piece.
+
 {b'announce': b'http://localhost:8080/announce', 
 b'created by': b'mktorrent 1.1', 
 b'creation date': 1737047340, 
@@ -85,6 +92,30 @@ b'info':
     b'pieces': b'"Ycc\xb3\xde@\xb0o\x98\x1f\xb8]\x821.\x8c\x0e\xd5\x11', 
     b'private': 1}
 }
+
+index: 0, begin: 0, length: 12
+
+other torrent file: piece length: 262_144, file_length: 300_000
+
+while requesting piece 1: index 0, begin 0, begin 16384, begin 32768, etc. block_length: 2**14 = 16_384
+while requesting piece 2: index 1, being length: 2**14, EXCEPT on the last block,
+length would be 300000 % 2**14 = 5088 to get the remainder that's left.
+
+begin = range(0, piece_length, block_length)
+
+300_000 - 262_144
+
+block_length = 2**14
+begin = 0
+piece = 0 # is actually what we are looping over in a higher for loop
+data_left = piece_length
+while data_left > 0:
+    if piece == piece_count - 1 and data_left < block_length:
+        block_length = data_left
+    make request (piece, begin, block_length)
+    begin += block_length
+    data_left -= block_length
+
 """
 decoded_t = decode_torrentfile("./debian-12.9.0-amd64-netinst.iso.torrent")
 url = decoded_t[b"announce"].decode("utf-8")
@@ -160,8 +191,6 @@ while data[0] != Message_Type.UNCHOKE:
     print("DATA:", data)
     data = handle_recv(sock)
 
-print("Terminated")
-
 """"
   Piece Count: 2528
   Piece Size: 256.0 KiB
@@ -174,16 +203,16 @@ print("Terminated")
   request: index = 0 begin = 2^14, length = 2^14
   ...
 """
-begin = index = 0
-length = 2**14
+# begin = index = 0
+# length = 2**14
 # struct.pack('>III', index, begin, length)
 # int.to_bytes(begin, length=4, byteorder='big') + int.to_bytes(index, length=4, byteorder='big') + int.to_bytes(length, length=4, byteorder='big')
-payload = struct.pack(">III", index, begin, length)
-request_payload = handle_data(Message_Type.REQUEST, payload)
-sock.sendall(request_payload)
+# payload = struct.pack(">III", index, begin, length)
+# request_payload = handle_data(Message_Type.REQUEST, payload)
+# sock.sendall(request_payload)
 
-data = handle_recv(sock)
-print("REQUEST DATA:", data)
+# data = handle_recv(sock)
+# print("REQUEST DATA:", data)
 
 """
 aaaabbbb
@@ -191,6 +220,82 @@ piece size = 4 (bytes)
 piece count = 2
 """
 
+"""
+while requesting piece 0: index 0, begin 0, begin 16384, begin 32768, etc. block_length: 2**14 = 16_384
+while requesting piece 1: index 1, being length: 2**14, EXCEPT on the last block,
+length would be 300000 % 2**14 = 5088 to get the remainder that's left.
+
+begin = range(0, piece_length, block_length)
+
+300_000 - 262_144
+
+block_length = 2**14
+begin = 0
+index = 0 # is actually what we are looping over in a higher for loop
+data_left = piece_length
+while data_left > 0:
+    if index == piece_count - 1 and data_left < block_length:
+        block_length = data_left
+    make request (piece, begin, block_length)
+    begin += block_length
+    data_left -= block_length
+
+calculate piece hash
+verify that the piece hash matches the hash in the torrent file, otherwise retry (or error)
+the piece hash in the torrent file is a concatenation of hashes of each piece. so we 
+"""
+
+def verify_piece_hash(torrent_info, piece_hash, index):
+    print("PIECE HASH:", piece_hash, len(piece_hash))
+    torrent_piece_hash = torrent_info[b"info"][b"pieces"][index*20: index*20 + 20]
+    print("TORRENT PIECE HASH:", torrent_piece_hash, len(torrent_piece_hash))
+    return piece_hash == torrent_piece_hash
+
+def request_piece(s, torrent_info, index):
+    block_length = 2**14
+    begin = 0
+    piece_length = torrent_info[b"info"][b'piece length']
+    file_size = torrent_info[b"info"][b"length"]
+    piece_count = math.ceil(file_size / piece_length)
+    data_left = piece_length
+    data = b""
+
+    while data_left > 0: 
+        if index == piece_count - 1 and data_left < block_length: 
+            block_length = data_left
+        payload = struct.pack(">III", index, begin, block_length)
+        request_payload = handle_data(Message_Type.REQUEST, payload)
+        s.sendall(request_payload)
+        requested_data = handle_recv(sock)
+        recv_type, recv_index, recv_begin = struct.unpack(">cII", requested_data[:9])
+        assert recv_type == b'\x07', f"recv_type = {recv_type}"
+        assert recv_index == index, f"recv_index = {recv_index}"
+        assert recv_begin == begin, f"recv_begin = {recv_begin}"
+        data += requested_data[9:]
+        begin += block_length
+        data_left -= block_length
+
+    assert verify_piece_hash(torrent_info, sha1(data).digest(), index), f"BAD HASH"
+    return data
+
+def request_file(s, torrent_info):
+    data = b''
+    piece_length = torrent_info[b"info"][b'piece length']
+    file_size = torrent_info[b"info"][b"length"]
+    file_name = torrent_info[b"info"][b"name"].decode("utf8")
+    piece_count = math.ceil(file_size / piece_length)  
+
+    for index in range(piece_count):
+        data += request_piece(s, torrent_info, index)
+        print(f"finished piece: {index}")
+    
+    with open(file_name, "w") as f:
+        f.write(data)
+
+# data = request_piece(sock, decoded_t, 0)
+# print("REQUEST PIECE DATA:", data[:50])
+
+request_file(sock, decoded_t)
 
 def main():
     print("Hello from torrentclient!")
