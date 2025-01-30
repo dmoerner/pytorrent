@@ -1,4 +1,5 @@
 import bencoder
+import signal
 import math
 import ipaddress
 import socket
@@ -9,6 +10,23 @@ import requests
 from hashlib import sha1
 from enum import IntEnum
 
+def timeout(seconds=10, error_message='Timeout'):
+    def decorator(func):
+        def _handle_timeout(_, __):
+            raise TimeoutError(error_message)
+
+        def wrapper(*args, **kwargs):
+            signal.signal(signal.SIGALRM, _handle_timeout)
+            signal.alarm(seconds)
+            try:
+                result = func(*args, **kwargs)
+            finally:
+                signal.alarm(0)
+            return result
+
+        return wrapper
+
+    return decorator
 
 class Message_Type(IntEnum):
     CHOKE = 0
@@ -20,6 +38,15 @@ class Message_Type(IntEnum):
     REQUEST = 6
     PIECE = 7
     CANCEL = 8
+
+class BadHashError(Exception):
+    pass
+
+class ChokedError(Exception): 
+    pass
+
+class TimeoutError(Exception):
+    pass
 
 
 def decode_torrentfile(filename):
@@ -133,36 +160,77 @@ peers_list = [peers[i : i + 6] for i in range(0, len(peers), 6)]
 
 # TODO: change later
 # b'\x7f\x00\x00\x01\x1a\xe1
-first_peer = peers_list[0]
-peer_ip = ipaddress.IPv4Address(first_peer[:4]).exploded
-peer_port = int.from_bytes(first_peer[4:], byteorder="big")
+#first_peer = peers_list[0]
+#peer_ip = ipaddress.IPv4Address(first_peer[:4]).exploded
+#peer_port = int.from_bytes(first_peer[4:], byteorder="big")
 # print("PEERS LIST: ",peers_list)
-print("PEER IP:", peer_ip, "PEER PORT:", peer_port)
+#print("PEER IP:", peer_ip, "PEER PORT:", peer_port)
 # Connect to Peer
 """
 1. Send handshake, receive handshake, verify handshake (verify protocol, verify info_hash)
 2. Send a message: Unchoked
 3. Download data
 """
-sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+# sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 # PEER IP: 93.161.53.57 PEER PORT: 56251
 # sock.connect((peer_ip, peer_port))
-sock.connect(("93.161.53.57", 56251))
-payload_header = int.to_bytes(19, byteorder="big") + b"BitTorrent protocol"
-payload = (
-    payload_header + (int.to_bytes(0) * 8) + params["info_hash"] + params["peer_id"]
-)
+# sock.connect(("93.161.53.57", 56251))
+# payload_header = int.to_bytes(19, byteorder="big") + b"BitTorrent protocol"
+# payload = (
+#     payload_header + (int.to_bytes(0) * 8) + params["info_hash"] + params["peer_id"]
+# )
 
 
-sock.sendall(payload)
-handshake = sock.recv(68)
-print("PEER RESPONSE:", handshake)
+# sock.sendall(payload)
+# handshake = sock.recv(68)
+# print("PEER RESPONSE:", handshake)
 
-handshake_header = handshake[:20]
-handshake_info_hash = handshake[28:48]
+# handshake_header = handshake[:20]
+# handshake_info_hash = handshake[28:48]
 
-assert payload_header == handshake_header
-assert params["info_hash"] == handshake_info_hash
+# assert payload_header == handshake_header
+# assert params["info_hash"] == handshake_info_hash
+
+def wait_for_unchoke(s):
+    data = handle_recv(s)
+    while data[0] != Message_Type.UNCHOKE:
+        print("DATA:", data)
+        data = handle_recv(s)
+    print("DEBUG: wait_for_unchoke, data=", data)
+
+def handshake(peer_ip, peer_port):
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.connect((peer_ip, peer_port))
+
+    payload_header = int.to_bytes(19, byteorder="big") + b"BitTorrent protocol"
+    payload = (
+        payload_header + (int.to_bytes(0) * 8) + params["info_hash"] + params["peer_id"]
+    )
+
+    sock.sendall(payload)
+    handshake = sock.recv(68)
+    print("PEER RESPONSE:", handshake)
+
+    handshake_header = handshake[:20]
+    handshake_info_hash = handshake[28:48]
+
+    assert payload_header == handshake_header
+    assert params["info_hash"] == handshake_info_hash
+
+    bitfield = handle_recv(sock)    
+    print("BITFIELD:", bitfield)
+
+    interested = handle_data(Message_Type.INTERESTED)
+    sock.sendall(interested)
+
+    # data = handle_recv(sock)
+
+    # while data[0] != Message_Type.UNCHOKE:
+    #     print("DATA:", data)
+    #     data = handle_recv(sock)
+    wait_for_unchoke(sock)
+
+    return sock
 
 """
 us: handshake
@@ -175,21 +243,17 @@ us: request a piece
 them: (transfer data)
 
 """
+# TODO: change hard coded values
+# sock = handshake("93.161.53.57", 56251)
 
-bitfield = handle_recv(sock)
+# interested = handle_data(Message_Type.INTERESTED)
+# sock.sendall(interested)
 
-print("BITFIELD:", bitfield)
+# data = handle_recv(sock)
 
-interested = handle_data(Message_Type.INTERESTED)
-sock.sendall(interested)
-
-data = handle_recv(sock)
-
-# while handle_recv(sock)[0] != int.to_bytes(Message_Type.UNCHOKE):
-#     pass
-while data[0] != Message_Type.UNCHOKE:
-    print("DATA:", data)
-    data = handle_recv(sock)
+# while data[0] != Message_Type.UNCHOKE:
+#     print("DATA:", data)
+#     data = handle_recv(sock)
 
 """"
   Piece Count: 2528
@@ -251,6 +315,7 @@ def verify_piece_hash(torrent_info, piece_hash, index):
     print("TORRENT PIECE HASH:", torrent_piece_hash, len(torrent_piece_hash))
     return piece_hash == torrent_piece_hash
 
+@timeout(30)
 def request_piece(s, torrent_info, index):
     block_length = 2**14
     begin = 0
@@ -261,33 +326,75 @@ def request_piece(s, torrent_info, index):
     data = b""
 
     while data_left > 0: 
+        print(f"DEBUG: grabbing block {begin // 2**14} of piece {index}")
         if index == piece_count - 1 and data_left < block_length: 
             block_length = data_left
         payload = struct.pack(">III", index, begin, block_length)
         request_payload = handle_data(Message_Type.REQUEST, payload)
         s.sendall(request_payload)
-        requested_data = handle_recv(sock)
-        recv_type, recv_index, recv_begin = struct.unpack(">cII", requested_data[:9])
-        assert recv_type == b'\x07', f"recv_type = {recv_type}"
-        assert recv_index == index, f"recv_index = {recv_index}"
-        assert recv_begin == begin, f"recv_begin = {recv_begin}"
+        requested_data = handle_recv(s)
+
+        # loop until we get a piece type
+        while requested_data[0] != b'x\07':
+            if requested_data[0] == b'\x00': 
+                raise ChokedError
+            requested_data = handle_recv(s)
+
+        _,recv_index, recv_begin = struct.unpack(">cII", requested_data[:9])
+        # assert recv_index == index, f"recv_index = {recv_index}"
+        # assert recv_begin == begin, f"recv_begin = {recv_begin}"
+        # if recv_type != b'\x07' or recv_index != index or recv_begin != begin:
+        #     raise TimeoutError
+        if recv_index != index or recv_begin != begin:
+            raise TimeoutError
         data += requested_data[9:]
         begin += block_length
         data_left -= block_length
 
-    assert verify_piece_hash(torrent_info, sha1(data).digest(), index), f"BAD HASH"
+    if not verify_piece_hash(torrent_info, sha1(data).digest(), index):
+        raise BadHashError
     return data
 
-def request_file(s, torrent_info):
+def request_file(torrent_info, peer_ip, peer_port):
+    s = handshake(peer_ip, peer_port)
     data = b''
     piece_length = torrent_info[b"info"][b'piece length']
     file_size = torrent_info[b"info"][b"length"]
     file_name = torrent_info[b"info"][b"name"].decode("utf8")
     piece_count = math.ceil(file_size / piece_length)  
-
-    for index in range(piece_count):
-        data += request_piece(s, torrent_info, index)
-        print(f"finished piece: {index}")
+    index = 0
+    # for index in range(piece_count):
+    #     # catch: BadHash -> request_piece
+    #     try:
+    #         data += request_piece(s, torrent_info, index)
+    #         # increment index
+    #     except BadHashError:
+    #         # retry requesting piece
+    #         data += request_piece(s, torrent_info, index)
+    #     except ChokedError: 
+    #         # choked -> run some unchoking waiting algorithm on s, then request_piece.
+    #         wait_for_unchoke(s)
+    #         data += request_piece
+    #     except TimeoutError: 
+    #         # timeout error -> re-run handshake, update s to a new socket, then request_piece
+    #         pass
+    while index < piece_count:
+        # catch: BadHash -> request_piece
+        try:
+            data += request_piece(s, torrent_info, index)
+            print(f"finished piece: {index}")
+            index += 1
+            # increment index
+        except BadHashError:
+            # retry requesting piece
+            print("Bad hash, restarting piece")
+            continue
+        except ChokedError: 
+            # choked -> run some unchoking waiting algorithm on s, then request_piece.
+            wait_for_unchoke(s)
+        except TimeoutError: 
+            # timeout error -> re-run handshake, update s to a new socket, then request_piece
+            s = handshake(peer_ip, peer_port)
     
     with open(file_name, "w") as f:
         f.write(data)
@@ -295,7 +402,7 @@ def request_file(s, torrent_info):
 # data = request_piece(sock, decoded_t, 0)
 # print("REQUEST PIECE DATA:", data[:50])
 
-request_file(sock, decoded_t)
+#request_file(decoded_t, "93.161.53.57", 56251)
 
 def main():
     print("Hello from torrentclient!")
