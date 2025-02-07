@@ -8,6 +8,12 @@ import requests
 from hashlib import sha1
 from enum import IntEnum
 
+import queue
+import concurrent.futures
+import threading
+
+write_lock = threading.Lock()
+
 
 def timeout(seconds=10, error_message="Timeout"):
     def decorator(func):
@@ -175,8 +181,46 @@ def verify_piece_hash(torrent_info: dict, piece_hash: bytes, index: int) -> bool
     return piece_hash == torrent_piece_hash
 
 
+"""
+
+def _write_piece_to_disk(data: bytes, piece_info):
+    with write_lock:
+        with open(output_file, "r+b") as f:
+            f.seek(piece_start)
+            f.write(data)
+
+
+def download_piece(piece_info):
+    data = _request_piece(piece_info)
+    if not verify_piece_hash(...):
+        return False, args
+    _write_piece_to_disk(data, piece_info)
+    return True, None
+
+
+def download_file(args):
+    piece_queue = queue.Queue()
+
+    for piece_info in ...:
+        piece_queue.put(piece_info)
+
+    with concurrent.futures.ThreadPoolExecutor() as executor:
+        futures = []
+
+        while not piece_queue.empty():
+            piece_info = piece_queue.get()
+            futures.append(executor.submit(download_piece, piece_info))
+
+        for future in concurrent.futures.as_completed(futures):
+            success, piece_info = future.result()
+            if not success:
+                piece_queue.put(piece_info)
+
+"""
+
+
 @timeout(30)
-def request_piece(s: socket.socket, torrent_info: dict, index: int) -> bytes:
+def _request_piece(s: socket.socket, torrent_info: dict, index: int) -> bytes:
     """
     Request a piece from a peer. The order of messages is:
 
