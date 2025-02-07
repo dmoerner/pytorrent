@@ -52,13 +52,15 @@ class TimeoutError(Exception):
     pass
 
 
-def decode_torrentfile(filename):
+def decode_torrentfile(filename: str) -> dict:
     with open(filename, "rb") as f:
         decoded = bencoder.decode(f.read())
+        if not isinstance(decoded, dict):
+            raise ValueError
         return decoded
 
 
-def construct_get_request(info, peer_id, port=6881):
+def construct_get_request(info: dict, peer_id: bytes, port=6881) -> dict:
     info_bencoded = bencoder.encode(info)
     info_hash = sha1(info_bencoded).digest()
     return {
@@ -72,7 +74,7 @@ def construct_get_request(info, peer_id, port=6881):
     }
 
 
-def handle_recv(s):
+def handle_recv(s: socket.socket) -> bytes:
     """
     len = s.recv(4)
     do something to convert len into an int
@@ -94,7 +96,7 @@ def handle_recv(s):
     return data
 
 
-def handle_data(value_t, payload=b""):
+def handle_data(value_t: int, payload=b"") -> bytes:
     """2
     "\x00\x00\x01="
     "\x00\x00\x01=\x05\xff\xff\xff"
@@ -195,7 +197,7 @@ peers_list = [peers[i : i + 6] for i in range(0, len(peers), 6)]
 # assert params["info_hash"] == handshake_info_hash
 
 
-def wait_for_unchoke(s):
+def wait_for_unchoke(s: socket.socket):
     data = handle_recv(s)
     while data[0] != Message_Type.UNCHOKE:
         print("DATA:", data)
@@ -203,7 +205,7 @@ def wait_for_unchoke(s):
     print("DEBUG: wait_for_unchoke, data=", data)
 
 
-def handshake(peer_ip, peer_port):
+def handshake(peer_ip: socket._Address, peer_port: int) -> socket.socket:
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.connect((peer_ip, peer_port))
 
@@ -316,7 +318,7 @@ the piece hash in the torrent file is a concatenation of hashes of each piece. s
 """
 
 
-def verify_piece_hash(torrent_info, piece_hash, index):
+def verify_piece_hash(torrent_info: dict, piece_hash: bytes, index: int) -> bool:
     print("PIECE HASH:", piece_hash, len(piece_hash))
     torrent_piece_hash = torrent_info[b"info"][b"pieces"][index * 20 : index * 20 + 20]
     print("TORRENT PIECE HASH:", torrent_piece_hash, len(torrent_piece_hash))
@@ -324,7 +326,7 @@ def verify_piece_hash(torrent_info, piece_hash, index):
 
 
 @timeout(30)
-def request_piece(s, torrent_info, index):
+def request_piece(s: socket.socket, torrent_info: dict, index: int) -> bytes:
     block_length = 2**14
     begin = 0
     piece_length = torrent_info[b"info"][b"piece length"]
@@ -364,7 +366,7 @@ def request_piece(s, torrent_info, index):
     return data
 
 
-def request_file(torrent_info, peer_ip, peer_port):
+def request_file(torrent_info: dict, peer_ip: socket._Address, peer_port: int):
     s = handshake(peer_ip, peer_port)
     data = b""
     piece_length = torrent_info[b"info"][b"piece length"]
@@ -405,7 +407,7 @@ def request_file(torrent_info, peer_ip, peer_port):
             # timeout error -> re-run handshake, update s to a new socket, then request_piece
             s = handshake(peer_ip, peer_port)
 
-    with open(file_name, "w") as f:
+    with open(file_name, "wb") as f:
         f.write(data)
 
 
