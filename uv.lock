@@ -143,6 +143,15 @@ wheels = [
 ]
 
 [[package]]
+name = "pebble"
+version = "5.1.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/c6/b2/a83f1d951977e6392efdb21f4a901a3fd920b992450de9a464e59241d2ed/Pebble-5.1.0.tar.gz", hash = "sha256:5c30376f1827b21ecec4126ff90e7f22ad5501cac1ff2b32c86ff2601681f932", size = 35060 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/31/69/0fa75151350a9d7b848bfde929673ad505346940ae2713f862647394f0f7/Pebble-5.1.0-py3-none-any.whl", hash = "sha256:530a398299ecd3a4ed1baf2e4b8045d8280b1e665560b0b409f8d8e58db60111", size = 36177 },
+]
+
+[[package]]
 name = "requests"
 version = "2.32.3"
 source = { registry = "https://pypi.org/simple" }
@@ -189,6 +198,7 @@ source = { virtual = "." }
 dependencies = [
     { name = "bencoder" },
     { name = "flask" },
+    { name = "pebble" },
     { name = "requests" },
     { name = "ruff" },
 ]
@@ -197,6 +207,7 @@ dependencies = [
 requires-dist = [
     { name = "bencoder", specifier = ">=0.2.0" },
     { name = "flask", specifier = ">=3.1.0" },
+    { name = "pebble", specifier = ">=5.1.0" },
     { name = "requests", specifier = ">=2.32.3" },
     { name = "ruff", specifier = ">=0.9.3" },
 ]

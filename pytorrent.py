@@ -8,13 +8,12 @@ import requests
 from hashlib import sha1
 from enum import IntEnum
 
-import asyncio
 import ipaddress
-# import queue
-# import concurrent.futures
-# import threading
+import pebble
+import multiprocessing
+from concurrent.futures import TimeoutError
 
-write_lock = asyncio.Lock()
+write_lock = multiprocessing.Lock()
 
 
 def timeout(seconds=10, error_message="Timeout"):
@@ -145,8 +144,8 @@ def wait_for_unchoke(s: socket.socket):
 def handshake(peer_ip, peer_port: int, info_hash, peer_id) -> socket.socket:
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     # 93.161.53.57, 56251
-    # sock.connect((peer_ip, peer_port))
-    sock.connect(("93.161.53.57", 56251))
+    sock.connect((peer_ip, peer_port))
+    # sock.connect(("93.161.53.57", 56251))
 
 
     payload_header = int.to_bytes(19, byteorder="big") + b"BitTorrent protocol"
@@ -186,29 +185,25 @@ def verify_piece_hash(torrent_info: dict, piece_hash: bytes, index: int) -> bool
 
 
 
-async def _write_piece_to_disk(data: bytes, piece_index, torrent_info):
+def _write_piece_to_disk(data: bytes, piece_index, torrent_info):
     piece_length = torrent_info[b'piece length']
     output_file = torrent_info[b'name']
     piece_start = piece_index * piece_length
     print(f"DEBUG: Writing piece {piece_index}")
-    async with write_lock:
+    with write_lock:
         with open(output_file, "w+b") as f:
             f.seek(piece_start)
             f.write(data)
     print(f"DEBUG: Done writing piece {piece_index}")
 
-async def download_piece(piece_index, torrent_info, peer_list, info_hash, peer_id):
+def download_piece(piece_index, torrent_info, peer_list, info_hash, peer_id):
     peer = random.choice(peer_list)
-    try: 
-        data = await asyncio.to_thread(_request_piece, piece_index, torrent_info, peer, info_hash, peer_id)
-    except Exception as e:
-        print(f"exception! {e}")
-        raise e
+    data = _request_piece(piece_index, torrent_info, peer, info_hash, peer_id)
 
     #print(f"DEBUG: download_piece: data = {data}")
     if not verify_piece_hash(torrent_info, sha1(data).digest(), piece_index):
         raise Exception("Could not verify piece hash")
-    await _write_piece_to_disk(data, piece_index, torrent_info)
+    _write_piece_to_disk(data, piece_index, torrent_info)
     return
 
 """
@@ -279,7 +274,18 @@ async def event_handler(piece_index, torrent_info, peers_list, info_hash, peer_i
 #     results = await asyncio.gather(*tasks)
 #     print(f"All events processed. Results: {results}")
 
-async def download_file(torrent_dict):
+def task_done(future):
+    try:
+        result = future.result()  # blocks until results are ready
+    except TimeoutError as error:
+        print("Function took longer than %d seconds" % error.args[1])
+        print(error)
+    except Exception as error:
+        print("Function raised %s" % error)
+        print(error.traceback)  # traceback of the function
+
+
+def download_file(torrent_dict):
     tracker_url = torrent_dict[b"announce"].decode("utf-8")
     torrent_info = torrent_dict[b"info"]
     params = construct_announce(torrent_info)
@@ -302,10 +308,17 @@ async def download_file(torrent_dict):
     file_size = torrent_info[b"length"]
     piece_count = math.ceil(file_size / piece_length)
 
-    async with asyncio.TaskGroup() as tg:    
-        # for piece_index in range(piece_count):
-        for piece_index in range(10):
-            tg.create_task(event_handler(piece_index, torrent_info, peers_list, info_hash, peer_id))
+    TIMEOUT_SECONDS=30
+
+    with pebble.ProcessPool(max_workers=5, max_tasks=10) as pool:
+        for piece_index in range(0, 10):
+            future = pool.schedule(download_piece, args=[piece_index, torrent_info, peers_list, info_hash, peer_id], timeout=TIMEOUT_SECONDS)
+            future.add_done_callback(task_done)
+
+    # async with asyncio.TaskGroup() as tg:    
+    #     # for piece_index in range(piece_count):
+    #     for piece_index in range(10):
+    #         tg.create_task(event_handler(piece_index, torrent_info, peers_list, info_hash, peer_id))
     #results = await asyncio.gather(*tasks)
     print(f"All events processed.")
 
@@ -441,14 +454,14 @@ def _request_piece(piece_index, torrent_info: dict, peer, info_hash, peer_id) ->
 #     with open(file_name, "wb") as f:
 #         f.write(data)
 
-async def main():
+def main():
     print("Hello from torrentclient!")
 
     # Friendly peer: 93.161.53.57, 56251
 
     decoded_t = decode_torrentfile("./debian-12.9.0-amd64-netinst.iso.torrent")
-    await download_file(decoded_t)
+    download_file(decoded_t)
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
