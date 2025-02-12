@@ -8,12 +8,13 @@ import requests
 from hashlib import sha1
 from enum import IntEnum
 
+import asyncio
 import ipaddress
-import queue
-import concurrent.futures
-import threading
+# import queue
+# import concurrent.futures
+# import threading
 
-write_lock = threading.Lock()
+write_lock = asyncio.Lock()
 
 
 def timeout(seconds=10, error_message="Timeout"):
@@ -47,16 +48,6 @@ class Message_Type(IntEnum):
     CANCEL = 8
 
 
-class BadHashError(Exception):
-    pass
-
-
-class ChokedError(Exception):
-    pass
-
-
-class TimeoutError(Exception):
-    pass
 
 
 def decode_torrentfile(filename: str) -> dict:
@@ -123,6 +114,7 @@ def handle_recv(s: socket.socket) -> bytes:
         count += 1
 
     while len(data) < length:
+        # print("DEBUG: handle_recv. Waiting for all of the data...")
         data += s.recv(length - len(data))
     return data
 
@@ -147,7 +139,7 @@ def wait_for_unchoke(s: socket.socket):
     while data[0] != Message_Type.UNCHOKE:
         print("CHOKED, DATA:", data)
         data = handle_recv(s)
-    print("DEBUG: unchoked", data)
+    # print("DEBUG: unchoked", data)
 
 
 def handshake(peer_ip, peer_port: int, info_hash, peer_id) -> socket.socket:
@@ -194,25 +186,100 @@ def verify_piece_hash(torrent_info: dict, piece_hash: bytes, index: int) -> bool
 
 
 
-def _write_piece_to_disk(data: bytes, piece_index, torrent_info):
+async def _write_piece_to_disk(data: bytes, piece_index, torrent_info):
     piece_length = torrent_info[b'piece length']
     output_file = torrent_info[b'name']
     piece_start = piece_index * piece_length
-    with write_lock:
+    print(f"DEBUG: Writing piece {piece_index}")
+    async with write_lock:
         with open(output_file, "w+b") as f:
             f.seek(piece_start)
             f.write(data)
+    print(f"DEBUG: Done writing piece {piece_index}")
 
-def download_piece(piece_index, torrent_info, peer, info_hash, peer_id):
-    data = _request_piece(piece_index, torrent_info, peer, info_hash, peer_id)
-    
-    if not verify_piece_hash(torrent_info, sha1(data).digest(), piece_index ):
+async def download_piece(piece_index, torrent_info, peer_list, info_hash, peer_id):
+    peer = random.choice(peer_list)
+    try: 
+        data = await asyncio.to_thread(_request_piece, piece_index, torrent_info, peer, info_hash, peer_id)
+    except Exception as e:
+        print(f"exception! {e}")
+        raise e
+
+    #print(f"DEBUG: download_piece: data = {data}")
+    if not verify_piece_hash(torrent_info, sha1(data).digest(), piece_index):
         raise Exception("Could not verify piece hash")
-    _write_piece_to_disk(data, piece_index, torrent_info)
+    await _write_piece_to_disk(data, piece_index, torrent_info)
     return
 
+"""
+import asyncio
+import time
 
-def download_file(torrent_dict):
+async def event_handler(event_id, max_retries=3, timeout=5):
+    for attempt in range(max_retries):
+        try:
+            print(f"Event {event_id}: Attempt {attempt + 1}")
+            await asyncio.wait_for(simulate_event(event_id), timeout)
+            print(f"Event {event_id}: Success!")
+            return True
+        except asyncio.TimeoutError:
+            print(f"Event {event_id}: Timeout on attempt {attempt + 1}")
+        except Exception as e:
+             print(f"Event {event_id}: An error occurred - {e}")
+        await asyncio.sleep(1)  # Wait before retrying
+    print(f"Event {event_id}: Failed after {max_retries} attempts")
+    return False
+
+async def simulate_event(event_id):
+    await asyncio.sleep(2)
+    # Simulate random success or failure
+    if time.time() % 3 > 1:
+        return True
+    else:
+        raise Exception(f"Simulated failure for event {event_id}")
+
+async def main():
+    event_ids = ["A", "B", "C"]
+    tasks = [event_handler(event_id) for event_id in event_ids]
+    results = await asyncio.gather(*tasks)
+    print(f"All events processed. Results: {results}")
+
+if __name__ == "__main__":
+    asyncio.run(main())
+"""
+
+async def event_handler(piece_index, torrent_info, peers_list, info_hash, peer_id, max_retries=3, timeout=5):
+    for attempt in range(max_retries):
+        try:
+            async with asyncio.timeout(timeout):
+                print(f"Piece Index: {piece_index}: Attempt {attempt + 1}")
+                # await asyncio.wait_for(download_piece(piece_index, torrent_info, peers_list, info_hash, peer_id), timeout)
+                await download_piece(piece_index, torrent_info, peers_list, info_hash, peer_id)
+                print(f"Piece Index: {piece_index}: Success!")
+                return True
+        except TimeoutError as e:
+            print(f"Piece Index: {piece_index}: Timeout on attempt {attempt + 1}")
+        except Exception as e:
+             print(f"Piece Index: {piece_index}: An error of type {type(e).__name__} occurred - {e}")
+        await asyncio.sleep(1)  # Wait before retrying
+    print(f"Piece Index: {piece_index}: Failed after {max_retries} attempts")
+    return False
+
+# async def simulate_event(event_id):
+#     await asyncio.sleep(2)
+#     # Simulate random success or failure
+#     if time.time() % 3 > 1:
+#         return True
+#     else:
+#         raise Exception(f"Simulated failure for event {event_id}")
+
+# async def main():
+#     event_ids = ["A", "B", "C"]
+#     tasks = [event_handler(event_id) for event_id in event_ids]
+#     results = await asyncio.gather(*tasks)
+#     print(f"All events processed. Results: {results}")
+
+async def download_file(torrent_dict):
     tracker_url = torrent_dict[b"announce"].decode("utf-8")
     torrent_info = torrent_dict[b"info"]
     params = construct_announce(torrent_info)
@@ -235,27 +302,35 @@ def download_file(torrent_dict):
     file_size = torrent_info[b"length"]
     piece_count = math.ceil(file_size / piece_length)
 
-    with concurrent.futures.ThreadPoolExecutor() as executor:
-        futures_to_data = {}
-        #for piece_index in range(piece_count):
-        for piece_index in range(5):
-            peer = random.choice(peers_list)
-            futures_to_data[executor.submit(download_piece, piece_index, torrent_info, peer, info_hash, peer_id)] = piece_index
-        
-        while len(futures_to_data) > 0:
-            for future in concurrent.futures.as_completed(futures_to_data):
-                print(f'Current queue: {futures_to_data}')
-                if future.exception():
-                    print(future.exception())
-                    failed_piece = futures_to_data[future]
-                    newpeer = random.choice(peers_list)
-                    future_retry = executor.submit(download_piece, failed_piece, torrent_info, newpeer, info_hash, peer_id)
-                    futures_to_data[future_retry] = failed_piece
-                    print(f'Failure, adding to retry {failed_piece}')
-                else:
-                    print(f'Success, wrote piece {futures_to_data[future]}')
+    async with asyncio.TaskGroup() as tg:    
+        # for piece_index in range(piece_count):
+        for piece_index in range(10):
+            tg.create_task(event_handler(piece_index, torrent_info, peers_list, info_hash, peer_id))
+    #results = await asyncio.gather(*tasks)
+    print(f"All events processed.")
 
-                del futures_to_data[future]
+
+    # with concurrent.futures.ThreadPoolExecutor() as executor:
+    #     futures_to_data = {}
+    #     #for piece_index in range(piece_count):
+    #     for piece_index in range(5):
+    #         peer = random.choice(peers_list)
+    #         futures_to_data[executor.submit(download_piece, piece_index, torrent_info, peer, info_hash, peer_id)] = piece_index
+        
+    #     while len(futures_to_data) > 0:
+    #         for future in concurrent.futures.as_completed(futures_to_data):
+    #             print(f'Current queue: {futures_to_data}')
+    #             if future.exception():
+    #                 print(future.exception())
+    #                 failed_piece = futures_to_data[future]
+    #                 newpeer = random.choice(peers_list)
+    #                 future_retry = executor.submit(download_piece, failed_piece, torrent_info, newpeer, info_hash, peer_id)
+    #                 futures_to_data[future_retry] = failed_piece
+    #                 print(f'Failure, adding to retry {failed_piece}')
+    #             else:
+    #                 print(f'Success, wrote piece {futures_to_data[future]}')
+
+    #             del futures_to_data[future]
 
 
 #@timeout(30)
@@ -313,6 +388,7 @@ def _request_piece(piece_index, torrent_info: dict, peer, info_hash, peer_id) ->
         begin += block_length
         data_left -= block_length
 
+    print("DEBUG: Request piece is about to return!")
     return data
 
 
@@ -365,14 +441,14 @@ def _request_piece(piece_index, torrent_info: dict, peer, info_hash, peer_id) ->
 #     with open(file_name, "wb") as f:
 #         f.write(data)
 
-def main():
+async def main():
     print("Hello from torrentclient!")
 
     # Friendly peer: 93.161.53.57, 56251
 
     decoded_t = decode_torrentfile("./debian-12.9.0-amd64-netinst.iso.torrent")
-    download_file(decoded_t)
+    await download_file(decoded_t)
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
