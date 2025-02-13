@@ -2,11 +2,13 @@ import asyncio
 import bencoder
 import ipaddress
 import math
+import heapq
 import random
 import requests
 import signal
 import socket
 import struct
+import time
 
 from hashlib import sha1
 from enum import IntEnum
@@ -143,21 +145,24 @@ def wait_for_unchoke(s: socket.socket):
     # print("DEBUG: unchoked", data)
 
 
+@timeout(5)
 def handshake(peer_ip, peer_port: int, info_hash, peer_id) -> socket.socket:
+    # "Bad Peer": PEER_IP: 99.240.48.62, PEER_PORT: 8773
+    print(f"PEER_IP: {peer_ip}, PEER_PORT: {peer_port}")
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.connect((peer_ip, peer_port))
-
     payload_header = int.to_bytes(19, byteorder="big") + b"BitTorrent protocol"
     payload = payload_header + (int.to_bytes(0) * 8) + info_hash + peer_id
 
     sock.sendall(payload)
     handshake = sock.recv(68)
-    # print("PEER RESPONSE:", handshake)
+    print("PEER RESPONSE:", handshake)
     handshake_header = handshake[:20]
     handshake_info_hash = handshake[28:48]
 
-    assert payload_header == handshake_header
-    assert info_hash == handshake_info_hash
+    # AssertionError occurred - payload header = b'\x13BitTorrent protocol', handshake header = b''
+    assert payload_header == handshake_header, f"payload header = {payload_header}, handshake header = {handshake_header}"
+    assert info_hash == handshake_info_hash, f"info_hash = {info_hash} handshake info hash = {handshake_info_hash}"
 
     bitfield = handle_recv(sock)
     # print("BITFIELD:", bitfield)
@@ -165,6 +170,7 @@ def handshake(peer_ip, peer_port: int, info_hash, peer_id) -> socket.socket:
     interested = construct_peer_msg(Message_Type.INTERESTED)
     sock.sendall(interested)
 
+    print("DEBUG: Waiting for unchoke from peer:", peer_ip)
     wait_for_unchoke(sock)
     print("UNCHOKED by peer:", peer_ip)
     return sock
@@ -196,14 +202,33 @@ async def _write_piece_to_disk(data: bytes, piece_index, torrent_info):
     print(f"DEBUG: Done writing piece {piece_index}")
 
 
-async def download_piece(piece_index, torrent_info, peer_list, info_hash, peer_id):
+async def download_piece(piece_index, torrent_info, peer_list, peer_heap, info_hash, peer_id):
     """
     Download piece.
     """
-    peer = random.choice(peer_list)
-
+    decision = random.choice(["heap", "list"])
+    if peer_list and (decision == "list" or len(peer_heap) == 0 or peer_heap[0][0] >= 0):
+        print("DEBUG: We chose the list!")
+        peer = random.choice(peer_list)
+        peer_list.remove(peer)
+        score = 0
+    else:
+        print("DEBUG: We chose the heap! Current heap:", peer_heap)
+        score, peer = heapq.heappop(peer_heap)
     # This function is synchronous, but will contain timeout wrappers.
-    data = _request_piece(piece_index, torrent_info, peer, info_hash, peer_id)
+    try:
+        start = time.time()
+        data = _request_piece(piece_index, torrent_info, peer, info_hash, peer_id)
+        end = time.time()
+        speed = len(data) // (end - start)
+        heapq.heappush(peer_heap, (0 - speed, peer))
+    except Exception as e:
+        heapq.heappush(peer_heap, (score + 1, peer))
+        # delete peer from peer_list
+        # peer_list.remove(peer)
+        ip, port = extract_peer(peer)
+        print(f"DEBUG: Banned peer {ip}, port {port}")
+        raise e
 
     # print(f"DEBUG: download_piece: data = {data}")
     if not verify_piece_hash(torrent_info, sha1(data).digest(), piece_index):
@@ -213,14 +238,14 @@ async def download_piece(piece_index, torrent_info, peer_list, info_hash, peer_i
 
 
 async def event_handler(
-    piece_index, torrent_info, peers_list, info_hash, peer_id, max_retries=3, timeout=5
+    piece_index, torrent_info, peers_list, peers_heap, info_hash, peer_id, max_retries=3, timeout=5
 ):
     for attempt in range(max_retries):
         try:
             async with asyncio.timeout(timeout):
                 print(f"Piece Index: {piece_index}: Attempt {attempt + 1}")
                 await download_piece(
-                    piece_index, torrent_info, peers_list, info_hash, peer_id
+                    piece_index, torrent_info, peers_list, peers_heap, info_hash, peer_id
                 )
                 print(f"Piece Index: {piece_index}: Success!")
                 return True
@@ -248,6 +273,7 @@ async def download_file(torrent_dict):
         raise ValueError("Did not receive dict from tracker")
     peers = decoded_response[b"peers"]
     peers_list = [peers[i : i + 6] for i in range(0, len(peers), 6)]
+    peers_heap = []
 
     print("DEBUG: Received list of length", len(peers_list))
 
@@ -262,10 +288,14 @@ async def download_file(torrent_dict):
         # Only do 10 pieces for debugging:
         for piece_index in range(min(10, piece_count)):
             tg.create_task(
-                event_handler(piece_index, torrent_info, peers_list, info_hash, peer_id)
+                event_handler(piece_index, torrent_info, peers_list, peers_heap, info_hash, peer_id)
             )
     print(f"All events processed.")
 
+def extract_peer(peer):
+    peer_ip = ipaddress.IPv4Address(peer[:4]).exploded
+    peer_port = int.from_bytes(peer[4:], byteorder="big")
+    return peer_ip, peer_port
 
 @timeout(15)
 def _request_piece(piece_index, torrent_info: dict, peer, info_hash, peer_id) -> bytes:
@@ -281,9 +311,10 @@ def _request_piece(piece_index, torrent_info: dict, peer, info_hash, peer_id) ->
     us: request a piece
     them: (transfer data)
     """
-    peer_ip = ipaddress.IPv4Address(peer[:4]).exploded
-    peer_port = int.from_bytes(peer[4:], byteorder="big")
+    peer_ip, peer_port = extract_peer(peer)
     s = handshake(peer_ip, peer_port, info_hash, peer_id)
+
+    print(f"PEER_IP: {peer_ip}, PEER_PORT: {peer_port}, PIECE_INDEX: {piece_index}")
 
     block_length = 2**14
     begin = 0
@@ -292,8 +323,6 @@ def _request_piece(piece_index, torrent_info: dict, peer, info_hash, peer_id) ->
     piece_count = math.ceil(file_size / piece_length)
     data_left = piece_length
     data = b""
-
-    print(f"PEER_IP: {peer_ip}, PIECE_INDEX: {piece_index}")
 
     while data_left > 0:
         print(f"DEBUG: grabbing block {begin // 2**14} of piece {piece_index}")
