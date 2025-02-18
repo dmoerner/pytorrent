@@ -44,16 +44,20 @@ class Torrent:
         self.port = port
         self.torrent_info = torrent_dict[b"info"]
         self.info_hash = sha1(bencoder.encode(self.torrent_info)).digest()
-        self.peer_list = []
-        self.peer_heap = []
-        self.file_lock = asyncio.Lock()
-        self.peers_lock = asyncio.Lock()
         self.uploaded = 0
         self.downloaded = 0
         self.piece_length = self.torrent_info[b"piece length"]
         self.file_size = self.torrent_info[b"length"]
-        self.left = self.file_size
         self.piece_count = math.ceil(self.file_size / self.piece_length)
+        # The peers list and heap must be protected by the peers lock.
+        self.peers_lock = asyncio.Lock()
+        self.peer_list = []
+        self.peer_heap = []
+        # The amount left and the pieces completed are write protected
+        # by the files lock and only updated when a piece is written to disk.
+        self.file_lock = asyncio.Lock()
+        self.left = self.file_size
+        self.pieces = []
 
     async def Announce(self, event="empty", numwant=50, left=None):
         # Since default arguments are evaluated at function definition,
@@ -238,6 +242,7 @@ async def _write_piece_to_disk(piece_index: int, torrent: Torrent, data: bytes):
             f.seek(piece_start)
             f.write(data)
             torrent.left -= piece_size
+            torrent.pieces.append(piece_index)
     print(f"DEBUG: Done writing piece {piece_index}")
 
 
