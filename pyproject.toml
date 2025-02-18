@@ -6,7 +6,7 @@ readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
     "bencoder>=0.2.0",
-    "flask>=3.1.0",
+    "fastapi>=0.115.8",
     "requests>=2.32.3",
     "ruff>=0.9.3",
 ]

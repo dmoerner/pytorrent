@@ -1,22 +1,16 @@
-from flask import Flask, jsonify, request
+from fastapi import FastAPI, File
+from typing import Annotated
 
 import pytorrent
 
-app = Flask(__name__)
+app = FastAPI()
 
 
-@app.route("/progress")
-def get_progress():
-    return jsonify(pytorrent.progress())
+@app.get("/progress")
+async def get_progress() -> list[int]:
+    return pytorrent.progress()
 
 
-@app.route("/upload", methods=["POST"])
-def upload_torrent():
-    if "file" not in request.files:
-        return jsonify({"message": "No file uploaded"}), 400
-    file = request.files["file"]
-
-    # This needs to be modified to be non-blocking.
-    pytorrent.download_file(file)
-
-    return jsonify({"message": "File uploaded"})
+@app.post("/upload")
+async def upload_torrent(file: Annotated[bytes, File()]):
+    await pytorrent.download_file(file)

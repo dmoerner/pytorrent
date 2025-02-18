@@ -49,9 +49,9 @@ class Message_Type(IntEnum):
     CANCEL = 8
 
 
-def decode_torrentfile(filename: str) -> dict:
+def decode_torrentfile(file: bytes) -> dict:
     """
-    Given a torrent filename, return a bdecoded dict. Sample output:
+    Given a torrent file in bytes, return a bdecoded dict. Sample output:
 
     {b'announce': b'http://localhost:8080/announce',
     b'created by': b'mktorrent 1.1',
@@ -63,11 +63,10 @@ def decode_torrentfile(filename: str) -> dict:
         b'private': 1}
     }
     """
-    with open(filename, "rb") as f:
-        decoded = bencoder.decode(f.read())
-        if not isinstance(decoded, dict):
-            raise ValueError
-        return decoded
+    decoded = bencoder.decode(file)
+    if not isinstance(decoded, dict):
+        raise ValueError
+    return decoded
 
 
 def construct_announce(info: dict, port=6881) -> dict:
@@ -294,7 +293,8 @@ async def event_handler(
     return False
 
 
-async def download_file(torrent_dict: dict):
+async def download_file(torrent_file: bytes):
+    torrent_dict = decode_torrentfile(torrent_file)
     tracker_url = torrent_dict[b"announce"].decode("utf-8")
     torrent_info = torrent_dict[b"info"]
     params = construct_announce(torrent_info)
@@ -403,8 +403,8 @@ async def _request_piece(
 async def main():
     print("Hello from torrentclient!")
 
-    decoded_t = decode_torrentfile("./debian-12.9.0-amd64-netinst.iso.torrent")
-    await download_file(decoded_t)
+    with open("./debian-12.9.0-amd64-netinst.iso.torrent", "rb") as f:
+        await download_file(f.read())
 
 
 if __name__ == "__main__":
