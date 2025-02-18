@@ -11,6 +11,8 @@ import time
 
 from hashlib import sha1
 from enum import IntEnum
+from typing import List, Tuple
+from asyncio.streams import StreamReader, StreamWriter
 
 
 write_lock = asyncio.Lock()
@@ -94,7 +96,7 @@ def calc_info_hash(info: dict) -> bytes:
     return sha1(info_bencoded).digest()
 
 
-async def handle_recv(reader) -> bytes:
+async def handle_recv(reader: StreamReader) -> bytes:
     """
     Read a length-prefixed message, ignoring keepalives, and return the message
     in bytes.
@@ -133,7 +135,7 @@ def construct_peer_msg(value_t: int, payload=b"") -> bytes:
     )
 
 
-async def wait_for_unchoke(reader):
+async def wait_for_unchoke(reader: StreamReader):
     """
     Peers start out in a choked state. Wait for a peer to unchoke.
     """
@@ -144,7 +146,9 @@ async def wait_for_unchoke(reader):
 
 
 @timeout(5)
-async def handshake(peer_ip, peer_port: int, info_hash, peer_id):
+async def handshake(
+    peer_ip: str, peer_port: int, info_hash: bytes, peer_id: bytes
+) -> Tuple[StreamReader, StreamWriter]:
     """
     This function handshakes with a peer. It must have a timeout set, because
     if the peer's port is closed behind a firewall that DROPs packets instead
@@ -195,7 +199,7 @@ def verify_piece_hash(torrent_info: dict, piece_hash: bytes, index: int) -> bool
     return piece_hash == torrent_piece_hash
 
 
-async def _write_piece_to_disk(data: bytes, piece_index, torrent_info):
+async def _write_piece_to_disk(data: bytes, piece_index: int, torrent_info: dict):
     """
     Write a piece to disc. This uses write_lock.
     """
@@ -211,10 +215,19 @@ async def _write_piece_to_disk(data: bytes, piece_index, torrent_info):
 
 
 async def download_piece(
-    piece_index, torrent_info, peer_list, peer_heap, info_hash, peer_id
+    piece_index: int,
+    torrent_info: dict,
+    peer_list: List[bytes],
+    peer_heap: List[Tuple[float, bytes]],
+    info_hash: bytes,
+    peer_id: bytes,
 ):
     """
     Download piece.
+
+    Uses an optimistic algorithm to either choose a new peer or to choose a
+    seen peer from a priority queue which assigns peers scores a score
+    dependent on their speed.
     """
     decision = random.choice(["heap", "list"])
     if peer_list and (
@@ -227,7 +240,6 @@ async def download_piece(
     else:
         print("DEBUG: We chose the heap! Current heap:", peer_heap)
         score, peer = heapq.heappop(peer_heap)
-    # This function is synchronous, but will contain timeout wrappers.
     try:
         start = time.time()
         data = await _request_piece(piece_index, torrent_info, peer, info_hash, peer_id)
@@ -236,8 +248,6 @@ async def download_piece(
         heapq.heappush(peer_heap, (0 - speed, peer))
     except Exception as e:
         heapq.heappush(peer_heap, (score + 1, peer))
-        # delete peer from peer_list
-        # peer_list.remove(peer)
         ip, port = extract_peer(peer)
         print(f"DEBUG: Banned peer {ip}, port {port}")
         raise e
@@ -250,12 +260,12 @@ async def download_piece(
 
 
 async def event_handler(
-    piece_index,
-    torrent_info,
-    peers_list,
-    peers_heap,
-    info_hash,
-    peer_id,
+    piece_index: int,
+    torrent_info: dict,
+    peers_list: List[bytes],
+    peers_heap: List[Tuple[float, bytes]],
+    info_hash: bytes,
+    peer_id: bytes,
     max_retries=3,
     timeout=5,
 ):
@@ -284,7 +294,7 @@ async def event_handler(
     return False
 
 
-async def download_file(torrent_dict):
+async def download_file(torrent_dict: dict):
     tracker_url = torrent_dict[b"announce"].decode("utf-8")
     torrent_info = torrent_dict[b"info"]
     params = construct_announce(torrent_info)
@@ -324,7 +334,7 @@ async def download_file(torrent_dict):
     print(f"All events processed.")
 
 
-def extract_peer(peer):
+def extract_peer(peer: bytes) -> Tuple[str, int]:
     peer_ip = ipaddress.IPv4Address(peer[:4]).exploded
     peer_port = int.from_bytes(peer[4:], byteorder="big")
     return peer_ip, peer_port
@@ -332,7 +342,7 @@ def extract_peer(peer):
 
 @timeout(15)
 async def _request_piece(
-    piece_index, torrent_info: dict, peer, info_hash, peer_id
+    piece_index: int, torrent_info: dict, peer: bytes, info_hash: bytes, peer_id: bytes
 ) -> bytes:
     """
     Request a piece from a peer. The order of messages is:
