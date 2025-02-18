@@ -15,9 +15,6 @@ from typing import Tuple
 from asyncio.streams import StreamReader, StreamWriter
 
 
-write_lock = asyncio.Lock()
-
-
 def timeout(seconds=10, error_message="Timeout"):
     def decorator(func):
         def _handle_timeout(*_):
@@ -237,7 +234,7 @@ async def _write_piece_to_disk(piece_index: int, torrent: Torrent, data: bytes):
     # For the last piece, this may not be equal to piece_length.
     piece_size = len(data)
     print(f"DEBUG: Writing piece {piece_index}")
-    async with write_lock:
+    async with torrent.file_lock:
         with open(output_file, "w+b") as f:
             f.seek(piece_start)
             f.write(data)
