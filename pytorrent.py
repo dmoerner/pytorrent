@@ -55,7 +55,11 @@ class Torrent:
         self.left = self.file_size
         self.piece_count = math.ceil(self.file_size / self.piece_length)
 
-    async def GetPeers(self):
+    async def Announce(self, event="empty", numwant=50, left=None):
+        # Since default arguments are evaluated at function definition,
+        # we cannot self-reference the left property.
+        if left is None:
+            left = self.left
         tracker_url = self.torrent_dict[b"announce"].decode("utf-8")
         params = {
             "info_hash": self.info_hash,
@@ -63,8 +67,10 @@ class Torrent:
             "port": self.port,
             "uploaded": self.uploaded,
             "downloaded": self.downloaded,
-            "left": self.left,
+            "left": left,
             "compact": 1,
+            "event": event,
+            "numwant": numwant,
         }
         response = requests.get(tracker_url, params=params)
         decoded_response = bencoder.decode(response.content)
@@ -224,11 +230,14 @@ async def _write_piece_to_disk(piece_index: int, torrent: Torrent, data: bytes):
     piece_length = torrent.torrent_info[b"piece length"]
     output_file = torrent.torrent_info[b"name"]
     piece_start = piece_index * piece_length
+    # For the last piece, this may not be equal to piece_length.
+    piece_size = len(data)
     print(f"DEBUG: Writing piece {piece_index}")
     async with write_lock:
         with open(output_file, "w+b") as f:
             f.seek(piece_start)
             f.write(data)
+            torrent.left -= piece_size
     print(f"DEBUG: Done writing piece {piece_index}")
 
 
@@ -301,13 +310,15 @@ async def event_handler(
 async def download_file(torrent_file: bytes):
     torrent_dict = decode_torrentfile(torrent_file)
     torrent = Torrent(torrent_dict)
-    await torrent.GetPeers()
+    await torrent.Announce(event="started")
 
     async with asyncio.TaskGroup() as tg:
         # Only do 10 pieces for debugging:
         for piece_index in range(min(10, torrent.piece_count)):
             tg.create_task(event_handler(piece_index, torrent))
     print(f"All events processed.")
+
+    await torrent.Announce(event="completed", numwant=0)
 
 
 def extract_peer(peer: bytes) -> Tuple[str, int]:
