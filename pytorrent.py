@@ -11,7 +11,7 @@ import time
 
 from hashlib import sha1
 from enum import IntEnum
-from typing import List, Tuple
+from typing import Tuple
 from asyncio.streams import StreamReader, StreamWriter
 
 
@@ -35,6 +35,47 @@ def timeout(seconds=10, error_message="Timeout"):
         return wrapper
 
     return decorator
+
+
+class Torrent:
+    def __init__(self, torrent_dict: dict, port=6881):
+        self.torrent_dict = torrent_dict
+        self.peer_id = b"ptc-0.1-" + random.randbytes(12)
+        self.port = port
+        self.torrent_info = torrent_dict[b"info"]
+        self.info_hash = sha1(bencoder.encode(self.torrent_info)).digest()
+        self.peer_list = []
+        self.peer_heap = []
+        self.file_lock = asyncio.Lock()
+        self.peers_lock = asyncio.Lock()
+        self.uploaded = 0
+        self.downloaded = 0
+        self.piece_length = self.torrent_info[b"piece length"]
+        self.file_size = self.torrent_info[b"length"]
+        self.left = self.file_size
+        self.piece_count = math.ceil(self.file_size / self.piece_length)
+
+    async def GetPeers(self):
+        tracker_url = self.torrent_dict[b"announce"].decode("utf-8")
+        params = {
+            "info_hash": self.info_hash,
+            "peer_id": self.peer_id,
+            "port": self.port,
+            "uploaded": self.uploaded,
+            "downloaded": self.downloaded,
+            "left": self.left,
+            "compact": 1,
+        }
+        response = requests.get(tracker_url, params=params)
+        decoded_response = bencoder.decode(response.content)
+        if not isinstance(decoded_response, dict):
+            raise ValueError("Did not receive dict from tracker")
+        peers = decoded_response[b"peers"]
+        peers_list = [peers[i : i + 6] for i in range(0, len(peers), 6)]
+        async with self.peers_lock:
+            for peer in peers_list:
+                if peer not in self.peer_heap and peer not in self.peer_list:
+                    self.peer_list.append(peer)
 
 
 class Message_Type(IntEnum):
@@ -67,32 +108,6 @@ def decode_torrentfile(file: bytes) -> dict:
     if not isinstance(decoded, dict):
         raise ValueError
     return decoded
-
-
-def construct_announce(info: dict, port=6881) -> dict:
-    """
-    Given a torrent info dict and your port, construct the
-    params for a tracker announce.
-    """
-    peer_id = b"ptc-0.1-" + random.randbytes(12)
-    info_hash = calc_info_hash(info)
-    return {
-        "info_hash": info_hash,
-        "peer_id": peer_id,
-        "port": port,
-        "uploaded": 0,
-        "downloaded": 0,
-        "left": info[b"length"],
-        "compact": 1,
-    }
-
-
-def calc_info_hash(info: dict) -> bytes:
-    """
-    Calculate an info_hash given an info dict from a torrent.
-    """
-    info_bencoded = bencoder.encode(info)
-    return sha1(info_bencoded).digest()
 
 
 async def handle_recv(reader: StreamReader) -> bytes:
@@ -146,7 +161,7 @@ async def wait_for_unchoke(reader: StreamReader):
 
 @timeout(5)
 async def handshake(
-    peer_ip: str, peer_port: int, info_hash: bytes, peer_id: bytes
+    peer_ip: str, peer_port: int, torrent: Torrent
 ) -> Tuple[StreamReader, StreamWriter]:
     """
     This function handshakes with a peer. It must have a timeout set, because
@@ -156,7 +171,9 @@ async def handshake(
     print(f"PEER_IP: {peer_ip}, PEER_PORT: {peer_port}")
     reader, writer = await asyncio.open_connection(peer_ip, peer_port)
     payload_header = int.to_bytes(19, byteorder="big") + b"BitTorrent protocol"
-    payload = payload_header + (int.to_bytes(0) * 8) + info_hash + peer_id
+    payload = (
+        payload_header + (int.to_bytes(0) * 8) + torrent.info_hash + torrent.peer_id
+    )
 
     writer.write(payload)
     await writer.drain()
@@ -171,8 +188,8 @@ async def handshake(
         payload_header == handshake_header
     ), f"payload header = {payload_header}, handshake header = {handshake_header}"
     assert (
-        info_hash == handshake_info_hash
-    ), f"info_hash = {info_hash} handshake info hash = {handshake_info_hash}"
+        torrent.info_hash == handshake_info_hash
+    ), f"info_hash = {torrent.info_hash} handshake info hash = {handshake_info_hash}"
 
     bitfield = await handle_recv(reader)
     _ = bitfield
@@ -187,23 +204,25 @@ async def handshake(
     return reader, writer
 
 
-def verify_piece_hash(torrent_info: dict, piece_hash: bytes, index: int) -> bool:
+def verify_piece_hash(piece_index: int, torrent: Torrent, piece_hash: bytes) -> bool:
     """
     Given the hash of a downloaded piece, verify that it matches the hash in the
     torrent file.
     """
     print("PIECE HASH:", piece_hash, len(piece_hash))
-    torrent_piece_hash = torrent_info[b"pieces"][index * 20 : index * 20 + 20]
+    torrent_piece_hash = torrent.torrent_info[b"pieces"][
+        piece_index * 20 : piece_index * 20 + 20
+    ]
     print("TORRENT PIECE HASH:", torrent_piece_hash, len(torrent_piece_hash))
     return piece_hash == torrent_piece_hash
 
 
-async def _write_piece_to_disk(data: bytes, piece_index: int, torrent_info: dict):
+async def _write_piece_to_disk(piece_index: int, torrent: Torrent, data: bytes):
     """
     Write a piece to disc. This uses write_lock.
     """
-    piece_length = torrent_info[b"piece length"]
-    output_file = torrent_info[b"name"]
+    piece_length = torrent.torrent_info[b"piece length"]
+    output_file = torrent.torrent_info[b"name"]
     piece_start = piece_index * piece_length
     print(f"DEBUG: Writing piece {piece_index}")
     async with write_lock:
@@ -213,14 +232,7 @@ async def _write_piece_to_disk(data: bytes, piece_index: int, torrent_info: dict
     print(f"DEBUG: Done writing piece {piece_index}")
 
 
-async def download_piece(
-    piece_index: int,
-    torrent_info: dict,
-    peer_list: List[bytes],
-    peer_heap: List[Tuple[float, bytes]],
-    info_hash: bytes,
-    peer_id: bytes,
-):
+async def download_piece(piece_index: int, torrent: Torrent):
     """
     Download piece.
 
@@ -229,42 +241,43 @@ async def download_piece(
     dependent on their speed.
     """
     decision = random.choice(["heap", "list"])
-    if peer_list and (
-        decision == "list" or len(peer_heap) == 0 or peer_heap[0][0] >= 0
-    ):
-        print("DEBUG: We chose the list!")
-        peer = random.choice(peer_list)
-        peer_list.remove(peer)
-        score = 0
-    else:
-        print("DEBUG: We chose the heap! Current heap:", peer_heap)
-        score, peer = heapq.heappop(peer_heap)
+    async with torrent.peers_lock:
+        if torrent.peer_list and (
+            decision == "list"
+            or len(torrent.peer_heap) == 0
+            or torrent.peer_heap[0][0] >= 0
+        ):
+            print("DEBUG: We chose the list!")
+            peer = random.choice(torrent.peer_list)
+            torrent.peer_list.remove(peer)
+            score = 0
+        else:
+            print("DEBUG: We chose the heap! Current heap:", torrent.peer_heap)
+            score, peer = heapq.heappop(torrent.peer_heap)
     try:
         start = time.time()
-        data = await _request_piece(piece_index, torrent_info, peer, info_hash, peer_id)
+        data = await _request_piece(piece_index, torrent, peer)
         end = time.time()
         speed = len(data) // (end - start)
-        heapq.heappush(peer_heap, (0 - speed, peer))
+        async with torrent.peers_lock:
+            heapq.heappush(torrent.peer_heap, (0 - speed, peer))
     except Exception as e:
-        heapq.heappush(peer_heap, (score + 1, peer))
+        async with torrent.peers_lock:
+            heapq.heappush(torrent.peer_heap, (score + 1, peer))
         ip, port = extract_peer(peer)
         print(f"DEBUG: Banned peer {ip}, port {port}")
         raise e
 
     # print(f"DEBUG: download_piece: data = {data}")
-    if not verify_piece_hash(torrent_info, sha1(data).digest(), piece_index):
+    if not verify_piece_hash(piece_index, torrent, sha1(data).digest()):
         raise Exception("Could not verify piece hash")
-    await _write_piece_to_disk(data, piece_index, torrent_info)
+    await _write_piece_to_disk(piece_index, torrent, data)
     return
 
 
 async def event_handler(
     piece_index: int,
-    torrent_info: dict,
-    peers_list: List[bytes],
-    peers_heap: List[Tuple[float, bytes]],
-    info_hash: bytes,
-    peer_id: bytes,
+    torrent: Torrent,
     max_retries=3,
     timeout=5,
 ):
@@ -272,14 +285,7 @@ async def event_handler(
         try:
             async with asyncio.timeout(timeout):
                 print(f"Piece Index: {piece_index}: Attempt {attempt + 1}")
-                await download_piece(
-                    piece_index,
-                    torrent_info,
-                    peers_list,
-                    peers_heap,
-                    info_hash,
-                    peer_id,
-                )
+                await download_piece(piece_index, torrent)
                 print(f"Piece Index: {piece_index}: Success!")
                 return True
         except TimeoutError as e:
@@ -288,49 +294,19 @@ async def event_handler(
             print(
                 f"Piece Index: {piece_index}: An error of type {type(e).__name__} occurred - {e}"
             )
-        await asyncio.sleep(1)  # Wait before retrying
     print(f"Piece Index: {piece_index}: Failed after {max_retries} attempts")
     return False
 
 
 async def download_file(torrent_file: bytes):
     torrent_dict = decode_torrentfile(torrent_file)
-    tracker_url = torrent_dict[b"announce"].decode("utf-8")
-    torrent_info = torrent_dict[b"info"]
-    params = construct_announce(torrent_info)
-    print("DEBUG: Contacting tracker")
-    response = requests.get(tracker_url, params=params)
-
-    # Decode peer list
-    decoded_response = bencoder.decode(response.content)
-    if not isinstance(decoded_response, dict):
-        raise ValueError("Did not receive dict from tracker")
-    peers = decoded_response[b"peers"]
-    peers_list = [peers[i : i + 6] for i in range(0, len(peers), 6)]
-    peers_heap = []
-
-    print("DEBUG: Received list of length", len(peers_list))
-
-    info_hash = params["info_hash"]
-    peer_id = params["peer_id"]
-
-    piece_length = torrent_info[b"piece length"]
-    file_size = torrent_info[b"length"]
-    piece_count = math.ceil(file_size / piece_length)
+    torrent = Torrent(torrent_dict)
+    await torrent.GetPeers()
 
     async with asyncio.TaskGroup() as tg:
         # Only do 10 pieces for debugging:
-        for piece_index in range(min(10, piece_count)):
-            tg.create_task(
-                event_handler(
-                    piece_index,
-                    torrent_info,
-                    peers_list,
-                    peers_heap,
-                    info_hash,
-                    peer_id,
-                )
-            )
+        for piece_index in range(min(10, torrent.piece_count)):
+            tg.create_task(event_handler(piece_index, torrent))
     print(f"All events processed.")
 
 
@@ -341,9 +317,7 @@ def extract_peer(peer: bytes) -> Tuple[str, int]:
 
 
 @timeout(15)
-async def _request_piece(
-    piece_index: int, torrent_info: dict, peer: bytes, info_hash: bytes, peer_id: bytes
-) -> bytes:
+async def _request_piece(piece_index: int, torrent: Torrent, peer: bytes) -> bytes:
     """
     Request a piece from a peer. The order of messages is:
 
@@ -357,14 +331,14 @@ async def _request_piece(
     them: (transfer data)
     """
     peer_ip, peer_port = extract_peer(peer)
-    reader, writer = await handshake(peer_ip, peer_port, info_hash, peer_id)
+    reader, writer = await handshake(peer_ip, peer_port, torrent)
 
     print(f"PEER_IP: {peer_ip}, PEER_PORT: {peer_port}, PIECE_INDEX: {piece_index}")
 
     block_length = 2**14
     begin = 0
-    piece_length = torrent_info[b"piece length"]
-    file_size = torrent_info[b"length"]
+    piece_length = torrent.torrent_info[b"piece length"]
+    file_size = torrent.torrent_info[b"length"]
     piece_count = math.ceil(file_size / piece_length)
     data_left = piece_length
     data = b""
