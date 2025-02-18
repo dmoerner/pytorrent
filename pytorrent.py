@@ -6,7 +6,6 @@ import heapq
 import random
 import requests
 import signal
-import socket
 import struct
 import time
 
@@ -19,7 +18,7 @@ write_lock = asyncio.Lock()
 
 def timeout(seconds=10, error_message="Timeout"):
     def decorator(func):
-        def _handle_timeout(_, __):
+        def _handle_timeout(*_):
             raise TimeoutError(error_message)
 
         def wrapper(*args, **kwargs):
@@ -95,12 +94,12 @@ def calc_info_hash(info: dict) -> bytes:
     return sha1(info_bencoded).digest()
 
 
-def handle_recv(s: socket.socket) -> bytes:
+async def handle_recv(reader) -> bytes:
     """
     Read a length-prefixed message, ignoring keepalives, and return the message
     in bytes.
     """
-    len_data = s.recv(4)
+    len_data = await reader.read(4)
     length = int.from_bytes(len_data, byteorder="big")
     data = b""
 
@@ -112,13 +111,13 @@ def handle_recv(s: socket.socket) -> bytes:
     while length == 0:
         if count > 5:
             raise TimeoutError
-        len_data = s.recv(4)
+        len_data = await reader.read(4)
         length = int.from_bytes(len_data, byteorder="big")
         count += 1
 
     while len(data) < length:
         # print("DEBUG: handle_recv. Waiting for all of the data...")
-        data += s.recv(length - len(data))
+        data += await reader.read(length - len(data))
     return data
 
 
@@ -134,46 +133,55 @@ def construct_peer_msg(value_t: int, payload=b"") -> bytes:
     )
 
 
-def wait_for_unchoke(s: socket.socket):
+async def wait_for_unchoke(reader):
     """
     Peers start out in a choked state. Wait for a peer to unchoke.
     """
-    data = handle_recv(s)
+    data = await handle_recv(reader)
     while data[0] != Message_Type.UNCHOKE:
         print("CHOKED, DATA:", data)
-        data = handle_recv(s)
-    # print("DEBUG: unchoked", data)
+        data = await handle_recv(reader)
 
 
 @timeout(5)
-def handshake(peer_ip, peer_port: int, info_hash, peer_id) -> socket.socket:
-    # "Bad Peer": PEER_IP: 99.240.48.62, PEER_PORT: 8773
+async def handshake(peer_ip, peer_port: int, info_hash, peer_id):
+    """
+    This function handshakes with a peer. It must have a timeout set, because
+    if the peer's port is closed behind a firewall that DROPs packets instead
+    of REJECTing them, the connection will just hang.
+    """
     print(f"PEER_IP: {peer_ip}, PEER_PORT: {peer_port}")
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.connect((peer_ip, peer_port))
+    reader, writer = await asyncio.open_connection(peer_ip, peer_port)
     payload_header = int.to_bytes(19, byteorder="big") + b"BitTorrent protocol"
     payload = payload_header + (int.to_bytes(0) * 8) + info_hash + peer_id
 
-    sock.sendall(payload)
-    handshake = sock.recv(68)
+    writer.write(payload)
+    await writer.drain()
+
+    handshake = await reader.read(68)
     print("PEER RESPONSE:", handshake)
     handshake_header = handshake[:20]
     handshake_info_hash = handshake[28:48]
 
     # AssertionError occurred - payload header = b'\x13BitTorrent protocol', handshake header = b''
-    assert payload_header == handshake_header, f"payload header = {payload_header}, handshake header = {handshake_header}"
-    assert info_hash == handshake_info_hash, f"info_hash = {info_hash} handshake info hash = {handshake_info_hash}"
+    assert (
+        payload_header == handshake_header
+    ), f"payload header = {payload_header}, handshake header = {handshake_header}"
+    assert (
+        info_hash == handshake_info_hash
+    ), f"info_hash = {info_hash} handshake info hash = {handshake_info_hash}"
 
-    bitfield = handle_recv(sock)
-    # print("BITFIELD:", bitfield)
+    bitfield = await handle_recv(reader)
+    _ = bitfield
 
     interested = construct_peer_msg(Message_Type.INTERESTED)
-    sock.sendall(interested)
+    writer.write(interested)
+    await writer.drain()
 
     print("DEBUG: Waiting for unchoke from peer:", peer_ip)
-    wait_for_unchoke(sock)
+    await wait_for_unchoke(reader)
     print("UNCHOKED by peer:", peer_ip)
-    return sock
+    return reader, writer
 
 
 def verify_piece_hash(torrent_info: dict, piece_hash: bytes, index: int) -> bool:
@@ -202,12 +210,16 @@ async def _write_piece_to_disk(data: bytes, piece_index, torrent_info):
     print(f"DEBUG: Done writing piece {piece_index}")
 
 
-async def download_piece(piece_index, torrent_info, peer_list, peer_heap, info_hash, peer_id):
+async def download_piece(
+    piece_index, torrent_info, peer_list, peer_heap, info_hash, peer_id
+):
     """
     Download piece.
     """
     decision = random.choice(["heap", "list"])
-    if peer_list and (decision == "list" or len(peer_heap) == 0 or peer_heap[0][0] >= 0):
+    if peer_list and (
+        decision == "list" or len(peer_heap) == 0 or peer_heap[0][0] >= 0
+    ):
         print("DEBUG: We chose the list!")
         peer = random.choice(peer_list)
         peer_list.remove(peer)
@@ -218,7 +230,7 @@ async def download_piece(piece_index, torrent_info, peer_list, peer_heap, info_h
     # This function is synchronous, but will contain timeout wrappers.
     try:
         start = time.time()
-        data = _request_piece(piece_index, torrent_info, peer, info_hash, peer_id)
+        data = await _request_piece(piece_index, torrent_info, peer, info_hash, peer_id)
         end = time.time()
         speed = len(data) // (end - start)
         heapq.heappush(peer_heap, (0 - speed, peer))
@@ -238,14 +250,26 @@ async def download_piece(piece_index, torrent_info, peer_list, peer_heap, info_h
 
 
 async def event_handler(
-    piece_index, torrent_info, peers_list, peers_heap, info_hash, peer_id, max_retries=3, timeout=5
+    piece_index,
+    torrent_info,
+    peers_list,
+    peers_heap,
+    info_hash,
+    peer_id,
+    max_retries=3,
+    timeout=5,
 ):
     for attempt in range(max_retries):
         try:
             async with asyncio.timeout(timeout):
                 print(f"Piece Index: {piece_index}: Attempt {attempt + 1}")
                 await download_piece(
-                    piece_index, torrent_info, peers_list, peers_heap, info_hash, peer_id
+                    piece_index,
+                    torrent_info,
+                    peers_list,
+                    peers_heap,
+                    info_hash,
+                    peer_id,
                 )
                 print(f"Piece Index: {piece_index}: Success!")
                 return True
@@ -288,17 +312,28 @@ async def download_file(torrent_dict):
         # Only do 10 pieces for debugging:
         for piece_index in range(min(10, piece_count)):
             tg.create_task(
-                event_handler(piece_index, torrent_info, peers_list, peers_heap, info_hash, peer_id)
+                event_handler(
+                    piece_index,
+                    torrent_info,
+                    peers_list,
+                    peers_heap,
+                    info_hash,
+                    peer_id,
+                )
             )
     print(f"All events processed.")
+
 
 def extract_peer(peer):
     peer_ip = ipaddress.IPv4Address(peer[:4]).exploded
     peer_port = int.from_bytes(peer[4:], byteorder="big")
     return peer_ip, peer_port
 
+
 @timeout(15)
-def _request_piece(piece_index, torrent_info: dict, peer, info_hash, peer_id) -> bytes:
+async def _request_piece(
+    piece_index, torrent_info: dict, peer, info_hash, peer_id
+) -> bytes:
     """
     Request a piece from a peer. The order of messages is:
 
@@ -312,7 +347,7 @@ def _request_piece(piece_index, torrent_info: dict, peer, info_hash, peer_id) ->
     them: (transfer data)
     """
     peer_ip, peer_port = extract_peer(peer)
-    s = handshake(peer_ip, peer_port, info_hash, peer_id)
+    reader, writer = await handshake(peer_ip, peer_port, info_hash, peer_id)
 
     print(f"PEER_IP: {peer_ip}, PEER_PORT: {peer_port}, PIECE_INDEX: {piece_index}")
 
@@ -330,14 +365,15 @@ def _request_piece(piece_index, torrent_info: dict, peer, info_hash, peer_id) ->
             block_length = data_left
         payload = struct.pack(">III", piece_index, begin, block_length)
         request_payload = construct_peer_msg(Message_Type.REQUEST, payload)
-        s.sendall(request_payload)
-        requested_data = handle_recv(s)
+        writer.write(request_payload)
+        await writer.drain()
+        requested_data = await handle_recv(reader)
 
         # loop until we get a piece type
         while requested_data[0] != Message_Type.PIECE:
             if requested_data[0] == Message_Type.CHOKE:
-                wait_for_unchoke(s)
-            requested_data = handle_recv(s)
+                await wait_for_unchoke(reader)
+            requested_data = await handle_recv(reader)
 
         _, recv_index, recv_begin = struct.unpack(">cII", requested_data[:9])
         # assert recv_index == index, f"recv_index = {recv_index}"
