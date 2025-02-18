@@ -84,6 +84,39 @@ class Torrent:
                 if peer not in self.peer_heap and peer not in self.peer_list:
                     self.peer_list.append(peer)
 
+    async def Download(self):
+        await self.Announce(event="started")
+
+        async with asyncio.TaskGroup() as tg:
+            # Only do 10 pieces for debugging:
+            for piece_index in range(min(10, self.piece_count)):
+                tg.create_task(event_handler(piece_index, self))
+        print(f"All events processed.")
+
+        await self.Announce(event="completed", numwant=0)
+
+
+class TorrentManager:
+    def __init__(self):
+        self.torrents = {}
+
+    def Add(self, torrent_data: bytes) -> Torrent:
+        torrent_dict = decode_torrentfile(torrent_data)
+        torrent = Torrent(torrent_dict)
+        self.torrents[torrent.info_hash] = torrent
+        return torrent
+
+    def Get(self, infohash: bytes) -> dict:
+        torrent = self.torrents[infohash]
+        return {
+            "torrent_dict": torrent.torrent_dict,
+            "left": torrent.left,
+            "pieces": torrent.pieces,
+            "peer_heap": torrent.peer_heap,
+            "uploaded": torrent.uploaded,
+            "downloaded": torrent.downloaded,
+        }
+
 
 class Message_Type(IntEnum):
     CHOKE = 0
@@ -239,6 +272,7 @@ async def _write_piece_to_disk(piece_index: int, torrent: Torrent, data: bytes):
             f.seek(piece_start)
             f.write(data)
             torrent.left -= piece_size
+            torrent.downloaded += piece_size
             torrent.pieces.append(piece_index)
     print(f"DEBUG: Done writing piece {piece_index}")
 
@@ -309,20 +343,6 @@ async def event_handler(
     return False
 
 
-async def download_file(torrent_file: bytes):
-    torrent_dict = decode_torrentfile(torrent_file)
-    torrent = Torrent(torrent_dict)
-    await torrent.Announce(event="started")
-
-    async with asyncio.TaskGroup() as tg:
-        # Only do 10 pieces for debugging:
-        for piece_index in range(min(10, torrent.piece_count)):
-            tg.create_task(event_handler(piece_index, torrent))
-    print(f"All events processed.")
-
-    await torrent.Announce(event="completed", numwant=0)
-
-
 def extract_peer(peer: bytes) -> Tuple[str, int]:
     peer_ip = ipaddress.IPv4Address(peer[:4]).exploded
     peer_port = int.from_bytes(peer[4:], byteorder="big")
@@ -390,8 +410,11 @@ async def _request_piece(piece_index: int, torrent: Torrent, peer: bytes) -> byt
 async def main():
     print("Hello from torrentclient!")
 
+    manager = TorrentManager()
+
     with open("./debian-12.9.0-amd64-netinst.iso.torrent", "rb") as f:
-        await download_file(f.read())
+        torrent = manager.Add(f.read())
+        await torrent.Download()
 
 
 if __name__ == "__main__":
