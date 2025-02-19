@@ -1,6 +1,7 @@
 import asyncio
 import bencoder
 import ipaddress
+import logging
 import math
 import heapq
 import random
@@ -14,11 +15,12 @@ from enum import IntEnum
 from typing import Tuple
 from asyncio.streams import StreamReader, StreamWriter
 
+logger = logging.getLogger(__name__)
 
 def timeout(seconds=10, error_message="Timeout"):
     def decorator(func):
         def _handle_timeout(*_):
-            raise TimeoutError(error_message)
+            raise TimeoutError(func)
 
         def wrapper(*args, **kwargs):
             signal.signal(signal.SIGALRM, _handle_timeout)
@@ -50,6 +52,7 @@ class Torrent:
         self.peers_lock = asyncio.Lock()
         self.peer_list = []
         self.peer_heap = []
+        self.peers_socket_streams = {}
         # The amount left and the pieces completed are write protected
         # by the files lock and only updated when a piece is written to disk.
         self.file_lock = asyncio.Lock()
@@ -85,13 +88,14 @@ class Torrent:
                     self.peer_list.append(peer)
 
     async def Download(self):
+        sem = asyncio.Semaphore(10)
         await self.Announce(event="started")
 
         async with asyncio.TaskGroup() as tg:
             # Only do 10 pieces for debugging:
-            for piece_index in range(min(10, self.piece_count)):
-                tg.create_task(event_handler(piece_index, self))
-        print(f"All events processed.")
+            for piece_index in range(self.piece_count):
+                tg.create_task(event_handler(piece_index, self, sem))
+        logger.debug(f"All events processed.")
 
         await self.Announce(event="completed", numwant=0)
 
@@ -160,7 +164,7 @@ async def handle_recv(reader: StreamReader) -> bytes:
     data = b""
 
     if length == 0:
-        print("DEBUG: recv keepalive, if this hangs, check line 117")
+        logger.debug("DEBUG: recv keepalive, if this hangs, check line 117")
 
     # Ignore keepalives, up to a maximum of 5. Then move on to another peer.
     count = 0
@@ -172,7 +176,7 @@ async def handle_recv(reader: StreamReader) -> bytes:
         count += 1
 
     while len(data) < length:
-        # print("DEBUG: handle_recv. Waiting for all of the data...")
+        # logger.debug("DEBUG: handle_recv. Waiting for all of the data...")
         data += await reader.read(length - len(data))
     return data
 
@@ -195,7 +199,7 @@ async def wait_for_unchoke(reader: StreamReader):
     """
     data = await handle_recv(reader)
     while data[0] != Message_Type.UNCHOKE:
-        print("CHOKED, DATA:", data)
+        logger.debug("CHOKED, DATA:", data)
         data = await handle_recv(reader)
 
 
@@ -208,8 +212,13 @@ async def handshake(
     if the peer's port is closed behind a firewall that DROPs packets instead
     of REJECTing them, the connection will just hang.
     """
-    print(f"PEER_IP: {peer_ip}, PEER_PORT: {peer_port}")
+    if (peer_ip, peer_port) in torrent.peers_socket_streams:
+        return torrent.peers_socket_streams[(peer_ip, peer_port)]
+    
+    logger.debug(f"PEER_IP: {peer_ip}, PEER_PORT: {peer_port}")
+
     reader, writer = await asyncio.open_connection(peer_ip, peer_port)
+
     payload_header = int.to_bytes(19, byteorder="big") + b"BitTorrent protocol"
     payload = (
         payload_header + (int.to_bytes(0) * 8) + torrent.info_hash + torrent.peer_id
@@ -219,7 +228,7 @@ async def handshake(
     await writer.drain()
 
     handshake = await reader.read(68)
-    print("PEER RESPONSE:", handshake)
+    logger.debug("PEER RESPONSE:", handshake)
     handshake_header = handshake[:20]
     handshake_info_hash = handshake[28:48]
 
@@ -238,9 +247,12 @@ async def handshake(
     writer.write(interested)
     await writer.drain()
 
-    print("DEBUG: Waiting for unchoke from peer:", peer_ip)
+    logger.debug("DEBUG: Waiting for unchoke from peer:", peer_ip)
     await wait_for_unchoke(reader)
-    print("UNCHOKED by peer:", peer_ip)
+    logger.debug("UNCHOKED by peer:", peer_ip)
+
+    torrent.peers_socket_streams[(peer_ip, peer_port)] = (reader, writer)
+
     return reader, writer
 
 
@@ -249,11 +261,11 @@ def verify_piece_hash(piece_index: int, torrent: Torrent, piece_hash: bytes) -> 
     Given the hash of a downloaded piece, verify that it matches the hash in the
     torrent file.
     """
-    print("PIECE HASH:", piece_hash, len(piece_hash))
+    logger.debug("PIECE HASH:", piece_hash, len(piece_hash))
     torrent_piece_hash = torrent.torrent_info[b"pieces"][
         piece_index * 20 : piece_index * 20 + 20
     ]
-    print("TORRENT PIECE HASH:", torrent_piece_hash, len(torrent_piece_hash))
+    logger.debug("TORRENT PIECE HASH:", torrent_piece_hash, len(torrent_piece_hash))
     return piece_hash == torrent_piece_hash
 
 
@@ -266,7 +278,7 @@ async def _write_piece_to_disk(piece_index: int, torrent: Torrent, data: bytes):
     piece_start = piece_index * piece_length
     # For the last piece, this may not be equal to piece_length.
     piece_size = len(data)
-    print(f"DEBUG: Writing piece {piece_index}")
+    logger.debug(f"DEBUG: Writing piece {piece_index}")
     async with torrent.file_lock:
         with open(output_file, "w+b") as f:
             f.seek(piece_start)
@@ -274,7 +286,7 @@ async def _write_piece_to_disk(piece_index: int, torrent: Torrent, data: bytes):
             torrent.left -= piece_size
             torrent.downloaded += piece_size
             torrent.pieces.append(piece_index)
-    print(f"DEBUG: Done writing piece {piece_index}")
+    logger.debug(f"DEBUG: Done writing piece {piece_index}")
 
 
 async def download_piece(piece_index: int, torrent: Torrent):
@@ -287,17 +299,21 @@ async def download_piece(piece_index: int, torrent: Torrent):
     """
     decision = random.choice(["heap", "list"])
     async with torrent.peers_lock:
+        while not torrent.peer_list and not torrent.peer_heap:
+            # We could sometimes do a torrent.Announce() to get more peers here.
+            logger.debug("DEBUG: Waiting for a peer slot to open up")
+            await asyncio.sleep(1)
         if torrent.peer_list and (
             decision == "list"
             or len(torrent.peer_heap) == 0
             or torrent.peer_heap[0][0] >= 0
         ):
-            print("DEBUG: We chose the list!")
+            logger.debug("DEBUG: We chose the list!")
             peer = random.choice(torrent.peer_list)
             torrent.peer_list.remove(peer)
             score = 0
         else:
-            print("DEBUG: We chose the heap! Current heap:", torrent.peer_heap)
+            logger.debug("DEBUG: We chose the heap! Current heap:", torrent.peer_heap)
             score, peer = heapq.heappop(torrent.peer_heap)
     try:
         start = time.time()
@@ -306,14 +322,28 @@ async def download_piece(piece_index: int, torrent: Torrent):
         speed = len(data) // (end - start)
         async with torrent.peers_lock:
             heapq.heappush(torrent.peer_heap, (0 - speed, peer))
+    except (ConnectionRefusedError, AssertionError) as e:
+        ip, port = extract_peer(peer)
+        logger.debug(f"DEBUG: Banned peer {ip}, {port}")
+        raise e
+    except TimeoutError as e:
+        if e.args[0] is handshake:
+            ip, port = extract_peer(peer)
+            logger.debug(f"DEBUG: Banned peer {ip}, {port}")
+            raise e
+        else:
+            ip, port = extract_peer(peer)
+            logger.debug(f"DEBUG: Slow peer timed out, increased score: {ip}, {port}")
+            async with torrent.peers_lock:
+                heapq.heappush(torrent.peer_heap, (score + 1, peer))
+            raise e
     except Exception as e:
+        logger.debug(f"DEBUG: This is an unhandled exception: {e}")
         async with torrent.peers_lock:
             heapq.heappush(torrent.peer_heap, (score + 1, peer))
-        ip, port = extract_peer(peer)
-        print(f"DEBUG: Banned peer {ip}, port {port}")
         raise e
 
-    # print(f"DEBUG: download_piece: data = {data}")
+    # logger.debug(f"DEBUG: download_piece: data = {data}")
     if not verify_piece_hash(piece_index, torrent, sha1(data).digest()):
         raise Exception("Could not verify piece hash")
     await _write_piece_to_disk(piece_index, torrent, data)
@@ -323,24 +353,26 @@ async def download_piece(piece_index: int, torrent: Torrent):
 async def event_handler(
     piece_index: int,
     torrent: Torrent,
-    max_retries=3,
+    sem: asyncio.Semaphore,
+    max_retries=10,
     timeout=5,
 ):
-    for attempt in range(max_retries):
-        try:
-            async with asyncio.timeout(timeout):
-                print(f"Piece Index: {piece_index}: Attempt {attempt + 1}")
-                await download_piece(piece_index, torrent)
-                print(f"Piece Index: {piece_index}: Success!")
-                return True
-        except TimeoutError as e:
-            print(f"Piece Index: {piece_index}: Timeout on attempt {attempt + 1}")
-        except Exception as e:
-            print(
-                f"Piece Index: {piece_index}: An error of type {type(e).__name__} occurred - {e}"
-            )
-    print(f"Piece Index: {piece_index}: Failed after {max_retries} attempts")
-    return False
+    async with sem:
+        for attempt in range(max_retries):
+            try:
+                async with asyncio.timeout(timeout):
+                    logger.debug(f"Piece Index: {piece_index}: Attempt {attempt + 1}")
+                    await download_piece(piece_index, torrent)
+                    logger.debug(f"Piece Index: {piece_index}: Success!")
+                    return True
+            except TimeoutError as e:
+                logger.debug(f"Piece Index: {piece_index}: Timeout on attempt {attempt + 1}")
+            except Exception as e:
+                logger.debug(
+                    f"Piece Index: {piece_index}: An error of type {type(e).__name__} occurred - {e}"
+                )
+        logger.debug(f"Piece Index: {piece_index}: Failed after {max_retries} attempts")
+        return False
 
 
 def extract_peer(peer: bytes) -> Tuple[str, int]:
@@ -366,7 +398,7 @@ async def _request_piece(piece_index: int, torrent: Torrent, peer: bytes) -> byt
     peer_ip, peer_port = extract_peer(peer)
     reader, writer = await handshake(peer_ip, peer_port, torrent)
 
-    print(f"PEER_IP: {peer_ip}, PEER_PORT: {peer_port}, PIECE_INDEX: {piece_index}")
+    logger.debug(f"PEER_IP: {peer_ip}, PEER_PORT: {peer_port}, PIECE_INDEX: {piece_index}")
 
     block_length = 2**14
     begin = 0
@@ -377,7 +409,7 @@ async def _request_piece(piece_index: int, torrent: Torrent, peer: bytes) -> byt
     data = b""
 
     while data_left > 0:
-        print(f"DEBUG: grabbing block {begin // 2**14} of piece {piece_index}")
+        logger.debug(f"DEBUG: grabbing block {begin // 2**14} of piece {piece_index}")
         if piece_index == piece_count - 1 and data_left < block_length:
             block_length = data_left
         payload = struct.pack(">III", piece_index, begin, block_length)
@@ -403,12 +435,13 @@ async def _request_piece(piece_index: int, torrent: Torrent, peer: bytes) -> byt
         begin += block_length
         data_left -= block_length
 
-    print("DEBUG: Request piece is about to return!")
+    logger.debug("DEBUG: Request piece is about to return!")
     return data
 
 
 async def main():
-    print("Hello from torrentclient!")
+    logging.basicConfig(level=logging.DEBUG)
+    logger.info("Hello from torrentclient!")
 
     manager = TorrentManager()
 
