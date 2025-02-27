@@ -43,6 +43,7 @@ class Torrent:
         self.port = port
         self.torrent_info = torrent_dict[b"info"]
         self.info_hash = sha1(bencoder.encode(self.torrent_info)).digest()
+        self.info_hashhex = sha1(bencoder.encode(self.torrent_info)).hexdigest()
         self.uploaded = 0
         self.downloaded = 0
         self.piece_length = self.torrent_info[b"piece length"]
@@ -108,7 +109,7 @@ class TorrentManager:
     def Add(self, torrent_data: bytes) -> Torrent:
         torrent_dict = decode_torrentfile(torrent_data)
         torrent = Torrent(torrent_dict)
-        self.torrents[torrent.info_hash] = torrent
+        self.torrents[torrent.info_hashhex] = torrent
         return torrent
 
     def Get(self, infohash: bytes) -> dict:

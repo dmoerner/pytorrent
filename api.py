@@ -1,16 +1,25 @@
 from fastapi import FastAPI, File
+from fastapi.staticfiles import StaticFiles
 from typing import Annotated
 
 import pytorrent
 
 app = FastAPI()
 
+manager = pytorrent.TorrentManager()
+torrents = dict()
 
-@app.get("/progress")
-async def get_progress() -> list[int]:
-    return pytorrent.progress()
+STATIC_DIR = "frontend/dist"
+
+app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="static")
+
+@app.get("/progress/{info_hashhex}")
+async def get_progress(info_hashhex: str) -> list[int]:
+    return torrents[info_hashhex].Get()
 
 
 @app.post("/upload")
 async def upload_torrent(file: Annotated[bytes, File()]):
-    await pytorrent.download_file(file)
+    torrent = manager.Add(file)
+    torrents[torrent.info_hashhex] = torrent
+    await torrent.Download()
