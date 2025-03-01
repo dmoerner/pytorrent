@@ -326,7 +326,7 @@ async def download_piece(piece_index: int, torrent: Torrent):
         logger.info(f"DEBUG: Good peer {ip}, {port}")
         async with torrent.peers_lock:
             heapq.heappush(torrent.peer_heap, (0 - speed, peer))
-    except (ConnectionRefusedError, AssertionError) as e:
+    except (ConnectionRefusedError, ConnectionResetError, AssertionError, OSError) as e:
         ip, port = extract_peer(peer)
         logger.info(f"DEBUG: Banned peer for ConnectionRefused or Assertion Error {ip}, {port}")
         raise e
@@ -342,7 +342,7 @@ async def download_piece(piece_index: int, torrent: Torrent):
                 heapq.heappush(torrent.peer_heap, (score + 1, peer))
             raise e
     except Exception as e:
-        logger.info(f"DEBUG: This is an unhandled exception when scoring peers: {e}")
+        logger.info(f"DEBUG: PIECE {piece_index} This is an unhandled exception when scoring peers: {e} {type(e)}")
         async with torrent.peers_lock:
             heapq.heappush(torrent.peer_heap, (score + 1, peer))
         raise e
@@ -359,16 +359,14 @@ async def event_handler(
     torrent: Torrent,
     sem: asyncio.Semaphore,
     max_retries=10,
-    timeout=5,
 ):
     async with sem:
         for attempt in range(max_retries):
             try:
-                async with asyncio.timeout(timeout):
-                    logger.debug(f"Piece Index: {piece_index}: Attempt {attempt + 1}")
-                    await download_piece(piece_index, torrent)
-                    logger.debug(f"Piece Index: {piece_index}: Success!")
-                    return True
+                logger.debug(f"Piece Index: {piece_index}: Attempt {attempt + 1}")
+                await download_piece(piece_index, torrent)
+                logger.debug(f"Piece Index: {piece_index}: Success!")
+                return True
             except TimeoutError:
                 logger.debug(f"Piece Index: {piece_index}: Timeout on attempt {attempt + 1}")
             except Exception as e:
