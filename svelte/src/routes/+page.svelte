@@ -89,7 +89,7 @@
 		<li>Name: {status.torrent_name}</li>
 		<li>
 			Percent complete: {Math.round(
-				(status.left / status.file_size) * 10000,
+				(status.left / status.size) * 10000,
 			) / 100}%
 		</li>
 		<li>Amount left: {status.left}</li>
