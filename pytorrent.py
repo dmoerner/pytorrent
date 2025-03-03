@@ -326,11 +326,8 @@ async def download_piece(piece_index: int, torrent: Torrent):
         logger.info(f"DEBUG: Good peer {ip}, {port}")
         async with torrent.peers_lock:
             heapq.heappush(torrent.peer_heap, (0 - speed, peer))
-    except (ConnectionRefusedError, ConnectionResetError, AssertionError, OSError) as e:
-        ip, port = extract_peer(peer)
-        logger.info(f"DEBUG: Banned peer for ConnectionRefused or Assertion Error {ip}, {port}")
-        raise e
     except TimeoutError as e:
+        # TimeoutError is a subset of OSError, so we must handle this first.
         if e.args[0] is handshake:
             ip, port = extract_peer(peer)
             logger.info(f"DEBUG: Banned peer for Handshaked Timeout {ip}, {port}")
@@ -341,13 +338,16 @@ async def download_piece(piece_index: int, torrent: Torrent):
             async with torrent.peers_lock:
                 heapq.heappush(torrent.peer_heap, (score + 1, peer))
             raise e
+    except (ConnectionRefusedError, ConnectionResetError, AssertionError, OSError) as e:
+        ip, port = extract_peer(peer)
+        logger.info(f"DEBUG: Banned peer for ConnectionRefused or Assertion Error {ip}, {port}")
+        raise e
     except Exception as e:
         logger.info(f"DEBUG: PIECE {piece_index} This is an unhandled exception when scoring peers: {e} {type(e)}")
         async with torrent.peers_lock:
             heapq.heappush(torrent.peer_heap, (score + 1, peer))
         raise e
 
-    # logger.debug(f"DEBUG: download_piece: data = {data}")
     if not verify_piece_hash(piece_index, torrent, sha1(data).digest()):
         raise Exception("Could not verify piece hash")
     await _write_piece_to_disk(piece_index, torrent, data)
