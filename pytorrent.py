@@ -133,22 +133,29 @@ class TorrentManager:
     def __init__(self):
         self.torrents = {}
 
-    def Add(self, torrent_data: bytes) -> Torrent:
+    def Add(self, torrent_data: bytes) -> str:
         torrent_dict = decode_torrentfile(torrent_data)
         torrent = Torrent(torrent_dict)
         self.torrents[torrent.info_hashhex] = torrent
-        return torrent
+        return torrent.info_hashhex
 
-    def Get(self, infohash: bytes) -> dict:
-        torrent = self.torrents[infohash]
-        return {
-            "torrent_dict": torrent.torrent_dict,
+    async def Start(self, info_hash: str):
+        await self.torrents[info_hash].Download()
+
+    def Get(self, info_hash: str) -> dict | None:
+        if info_hash not in self.torrents:
+            return None
+        torrent = self.torrents[info_hash]
+        response = {
+            "torrent_name": torrent.torrent_info[b"name"].decode(),
+            "size": torrent.file_size,
             "left": torrent.left,
             "pieces": torrent.pieces,
-            "peer_heap": torrent.peer_heap,
+            "piece_count": torrent.piece_count,
             "uploaded": torrent.uploaded,
             "downloaded": torrent.downloaded,
         }
+        return response
 
 
 class MessageType(IntEnum):

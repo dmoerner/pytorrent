@@ -9,4 +9,5 @@ dependencies = [
     "fastapi>=0.115.8",
     "requests>=2.32.3",
     "ruff>=0.9.3",
+    "starlette>=0.45.3",
 ]

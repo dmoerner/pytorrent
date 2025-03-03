@@ -192,6 +192,7 @@ dependencies = [
     { name = "fastapi" },
     { name = "requests" },
     { name = "ruff" },
+    { name = "starlette" },
 ]
 
 [package.metadata]
@@ -200,6 +201,7 @@ requires-dist = [
     { name = "fastapi", specifier = ">=0.115.8" },
     { name = "requests", specifier = ">=2.32.3" },
     { name = "ruff", specifier = ">=0.9.3" },
+    { name = "starlette", specifier = ">=0.45.3" },
 ]
 
 [[package]]
