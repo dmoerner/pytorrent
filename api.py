@@ -30,19 +30,14 @@ def get_status(info_hash: str) -> dict:
     response = manager.Get(info_hash)
     if response is None:
         raise HTTPException(status_code=404, detail="Torrent not found")
-    print(response)
     return response
 
 @app.post("/api/upload")
 async def upload_torrent(background_tasks: BackgroundTasks, file: UploadFile):
-    print("Received upload")
-
     if file.content_type != "application/x-bittorrent":
         raise HTTPException(status_code=415, detail="Unsupported file type")
     contents = await file.read()
     info_hash = manager.Add(contents)
-
-    print("Background task starts here")
 
     background_tasks.add_task(manager.Start, info_hash)
 
