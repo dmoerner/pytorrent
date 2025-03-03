@@ -4,7 +4,7 @@
 	let info_hash = $state("");
 
 	// JSON typing is not trivial. https://github.com/microsoft/TypeScript/issues/1897
-	let status = $state<any>();
+	let status = $state.raw<any>();
 
 	const pollStatus = async (info_hash: string) => {
 		const interval = setInterval(async () => {
