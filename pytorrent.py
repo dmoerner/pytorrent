@@ -1,23 +1,27 @@
 import asyncio
 import bencoder
+import heapq
 import ipaddress
 import logging
 import math
-import heapq
 import random
 import requests
 import signal
 import struct
 import time
 
+from asyncio.streams import StreamReader, StreamWriter
 from hashlib import sha1
 from enum import IntEnum
 from typing import Tuple
-from asyncio.streams import StreamReader, StreamWriter
 
 logger = logging.getLogger(__name__)
 
-def timeout(seconds=10, error_message="Timeout"):
+# WORKER_COUNT limits the number of concurrent tasks, controlled
+# by a semaphore.
+WORKER_COUNT = 10
+
+def timeout(seconds=10):
     def decorator(func):
         def _handle_timeout(*_):
             raise TimeoutError(func)
@@ -37,28 +41,43 @@ def timeout(seconds=10, error_message="Timeout"):
 
 
 class Torrent:
+    """
+    The Torrent class is the main object we manipulate. Encapsulated in it are
+    information about the torrent from the torrent file, information about the
+    current download progress, and locks.
+    """
     def __init__(self, torrent_dict: dict, port=6881):
-        self.torrent_dict = torrent_dict
+        # Information about our client
         self.peer_id = b"ptc-0.1-" + random.randbytes(12)
         self.port = port
+
+
+        # Information from torrent file
+        self.torrent_dict = torrent_dict
         self.torrent_info = torrent_dict[b"info"]
         self.info_hash = sha1(bencoder.encode(self.torrent_info)).digest()
         self.info_hashhex = sha1(bencoder.encode(self.torrent_info)).hexdigest()
-        self.uploaded = 0
-        self.downloaded = 0
         self.piece_length = self.torrent_info[b"piece length"]
         self.file_size = self.torrent_info[b"length"]
         self.piece_count = math.ceil(self.file_size / self.piece_length)
-        # The peers list and heap must be protected by the peers lock.
-        self.peers_lock = asyncio.Lock()
-        self.peer_list = []
-        self.peer_heap = []
-        self.peers_socket_streams = {}
+
+
+        # Progress information, including locks.
+        self.uploaded = 0
+        self.downloaded = 0
+
         # The amount left and the pieces completed are write protected
         # by the files lock and only updated when a piece is written to disk.
         self.file_lock = asyncio.Lock()
         self.left = self.file_size
         self.pieces = []
+
+        # The peers list and heap must be protected by the peers lock.
+        self.peers_lock = asyncio.Lock()
+        self.peer_list = []
+        self.peer_heap = []
+        self.peers_socket_streams = {}
+
 
     async def Announce(self, event="empty", numwant=50, left=None):
         # Since default arguments are evaluated at function definition,
@@ -89,12 +108,12 @@ class Torrent:
                     self.peer_list.append(peer)
             logger.info(f"Peer list: {self.peer_list}")
 
+
     async def Download(self):
-        sem = asyncio.Semaphore(10)
+        sem = asyncio.Semaphore(WORKER_COUNT)
         await self.Announce(event="started")
 
         async with asyncio.TaskGroup() as tg:
-            # Only do 10 pieces for debugging:
             for piece_index in range(self.piece_count):
                 tg.create_task(event_handler(piece_index, self, sem))
         logger.info("All events processed.")
@@ -103,6 +122,14 @@ class Torrent:
 
 
 class TorrentManager:
+    """
+    The TorrentManager class keeps a dictionary of current
+    torrent objects, and provides a method to get information about
+    them.
+
+    Currently only a single download is supported, but this Manager
+    is still a useful abstraction to get progress on that download.
+    """
     def __init__(self):
         self.torrents = {}
 
@@ -124,7 +151,7 @@ class TorrentManager:
         }
 
 
-class Message_Type(IntEnum):
+class MessageType(IntEnum):
     CHOKE = 0
     UNCHOKE = 1
     INTERESTED = 2
@@ -179,11 +206,12 @@ async def handle_recv(reader: StreamReader) -> bytes:
 
     while len(data) < length:
         # logger.debug("DEBUG: handle_recv. Waiting for all of the data...")
+        # Data may be buffered, so make sure we collect it all.
         data += await reader.read(length - len(data))
     return data
 
 
-def construct_peer_msg(value_t: int, payload=b"") -> bytes:
+def construct_peer_msg(value_t: MessageType, payload=b"") -> bytes:
     """
     Given a message type and a byte payload, return a length-prefixed
     message.
@@ -200,7 +228,7 @@ async def wait_for_unchoke(reader: StreamReader):
     Peers start out in a choked state. Wait for a peer to unchoke.
     """
     data = await handle_recv(reader)
-    while data[0] != Message_Type.UNCHOKE:
+    while data[0] != MessageType.UNCHOKE:
         logger.debug("CHOKED, DATA:", data)
         data = await handle_recv(reader)
 
@@ -234,7 +262,6 @@ async def handshake(
     handshake_header = handshake[:20]
     handshake_info_hash = handshake[28:48]
 
-    # AssertionError occurred - payload header = b'\x13BitTorrent protocol', handshake header = b''
     assert (
         payload_header == handshake_header
     ), f"payload header = {payload_header}, handshake header = {handshake_header}"
@@ -245,7 +272,7 @@ async def handshake(
     bitfield = await handle_recv(reader)
     _ = bitfield
 
-    interested = construct_peer_msg(Message_Type.INTERESTED)
+    interested = construct_peer_msg(MessageType.INTERESTED)
     writer.write(interested)
     await writer.drain()
 
@@ -271,7 +298,7 @@ def verify_piece_hash(piece_index: int, torrent: Torrent, piece_hash: bytes) -> 
     return piece_hash == torrent_piece_hash
 
 
-async def _write_piece_to_disk(piece_index: int, torrent: Torrent, data: bytes):
+async def write_piece_to_disk(piece_index: int, torrent: Torrent, data: bytes):
     """
     Write a piece to disc. This uses write_lock.
     """
@@ -319,7 +346,7 @@ async def download_piece(piece_index: int, torrent: Torrent):
             score, peer = heapq.heappop(torrent.peer_heap)
     try:
         start = time.time()
-        data = await _request_piece(piece_index, torrent, peer)
+        data = await request_piece(piece_index, torrent, peer)
         end = time.time()
         speed = len(data) // (end - start)
         ip, port = extract_peer(peer)
@@ -350,7 +377,7 @@ async def download_piece(piece_index: int, torrent: Torrent):
 
     if not verify_piece_hash(piece_index, torrent, sha1(data).digest()):
         raise Exception("Could not verify piece hash")
-    await _write_piece_to_disk(piece_index, torrent, data)
+    await write_piece_to_disk(piece_index, torrent, data)
     return
 
 
@@ -360,6 +387,9 @@ async def event_handler(
     sem: asyncio.Semaphore,
     max_retries=10,
 ):
+    """
+    This is the dispatcher, with retries, for each piece. It must hold a semaphore.
+    """
     async with sem:
         for attempt in range(max_retries):
             try:
@@ -384,7 +414,7 @@ def extract_peer(peer: bytes) -> Tuple[str, int]:
 
 
 @timeout(15)
-async def _request_piece(piece_index: int, torrent: Torrent, peer: bytes) -> bytes:
+async def request_piece(piece_index: int, torrent: Torrent, peer: bytes) -> bytes:
     """
     Request a piece from a peer. The order of messages is:
 
@@ -415,22 +445,18 @@ async def _request_piece(piece_index: int, torrent: Torrent, peer: bytes) -> byt
         if piece_index == piece_count - 1 and data_left < block_length:
             block_length = data_left
         payload = struct.pack(">III", piece_index, begin, block_length)
-        request_payload = construct_peer_msg(Message_Type.REQUEST, payload)
+        request_payload = construct_peer_msg(MessageType.REQUEST, payload)
         writer.write(request_payload)
         await writer.drain()
         requested_data = await handle_recv(reader)
 
         # loop until we get a piece type
-        while requested_data[0] != Message_Type.PIECE:
-            if requested_data[0] == Message_Type.CHOKE:
+        while requested_data[0] != MessageType.PIECE:
+            if requested_data[0] == MessageType.CHOKE:
                 await wait_for_unchoke(reader)
             requested_data = await handle_recv(reader)
 
         _, recv_index, recv_begin = struct.unpack(">cII", requested_data[:9])
-        # assert recv_index == index, f"recv_index = {recv_index}"
-        # assert recv_begin == begin, f"recv_begin = {recv_begin}"
-        # if recv_type != b'\x07' or recv_index != index or recv_begin != begin:
-        #     raise TimeoutError
         if recv_index != piece_index or recv_begin != begin:
             raise TimeoutError
         data += requested_data[9:]
@@ -443,7 +469,7 @@ async def _request_piece(piece_index: int, torrent: Torrent, peer: bytes) -> byt
 
 async def main():
     logging.basicConfig(level=logging.INFO)
-    logger.info("Hello from torrentclient!")
+    logger.debug("Hello from torrentclient!")
 
     manager = TorrentManager()
 
