@@ -346,14 +346,19 @@ async def download_piece(piece_index: int, torrent: Torrent):
         ):
             logger.debug("DEBUG: We chose the list!")
             peer = random.choice(torrent.peer_list)
-            # torrent.peer_list.remove(peer)
+            torrent.peer_list.remove(peer)
             score = 0
         else:
             logger.debug("DEBUG: We chose the heap! Current heap:", torrent.peer_heap)
             score, peer = heapq.heappop(torrent.peer_heap)
     try:
         start = time.time()
-        data = await request_piece(piece_index, torrent, peer)
+        
+        peer_ip, peer_port = extract_peer(peer)
+        reader, writer = await handshake(peer_ip, peer_port, torrent)
+        logger.info(f"PEER_IP: {peer_ip}, PEER_PORT: {peer_port}, PIECE_INDEX: {piece_index}")
+        
+        data = await request_piece(piece_index, torrent, reader, writer)
         end = time.time()
         speed = len(data) // (end - start)
         ip, port = extract_peer(peer)
@@ -421,7 +426,7 @@ def extract_peer(peer: bytes) -> Tuple[str, int]:
 
 
 @timeout(15)
-async def request_piece(piece_index: int, torrent: Torrent, peer: bytes) -> bytes:
+async def request_piece(piece_index: int, torrent: Torrent, reader: StreamReader, writer: StreamWriter) -> bytes:
     """
     Request a piece from a peer. The order of messages is:
 
@@ -434,10 +439,10 @@ async def request_piece(piece_index: int, torrent: Torrent, peer: bytes) -> byte
     us: request a piece
     them: (transfer data)
     """
-    peer_ip, peer_port = extract_peer(peer)
-    reader, writer = await handshake(peer_ip, peer_port, torrent)
+    # peer_ip, peer_port = extract_peer(peer)
+    # reader, writer = await handshake(peer_ip, peer_port, torrent)
 
-    logger.info(f"PEER_IP: {peer_ip}, PEER_PORT: {peer_port}, PIECE_INDEX: {piece_index}")
+    # logger.info(f"PEER_IP: {peer_ip}, PEER_PORT: {peer_port}, PIECE_INDEX: {piece_index}")
 
     block_length = 2**14
     begin = 0
@@ -445,6 +450,8 @@ async def request_piece(piece_index: int, torrent: Torrent, peer: bytes) -> byte
     file_size = torrent.torrent_info[b"length"]
     piece_count = math.ceil(file_size / piece_length)
     data_left = piece_length
+    if piece_index == piece_count - 1:
+        data_left = torrent.file_size % piece_length
     data = b""
 
     while data_left > 0:
@@ -482,8 +489,8 @@ async def main():
 
     with open("./debian-12.9.0-amd64-netinst.iso.torrent", "rb") as f:
         torrent = manager.Add(f.read())
-        await torrent.Download()
-
+        await manager.Start(torrent)
+        
 
 if __name__ == "__main__":
     asyncio.run(main())
