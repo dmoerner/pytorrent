@@ -1,4 +1,4 @@
-from ..pytorrent import *
+from ..pytorrent.pytorrent import *
 import asyncio
 import unittest
 import unittest.mock

@@ -1,14 +1,14 @@
 from fastapi import FastAPI, UploadFile, BackgroundTasks, HTTPException
-from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
-import pytorrent
+from .pytorrent import pytorrent
 
 app = FastAPI()
 
 manager = pytorrent.TorrentManager()
 
-STATIC_DIR = "frontend/dist"
+STATIC_DIR = "svelte/build"
 
 origins = [
     "http://localhost:5173", # local development server (svelte)
