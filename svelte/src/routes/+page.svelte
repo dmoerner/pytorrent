@@ -54,11 +54,6 @@
 	};
 
 	const handleUpload = async () => {
-		if (fileUploader.files === null) {
-			return;
-		}
-		files = fileUploader.files;
-
 		if (!files) {
 			return;
 		}
@@ -95,6 +90,7 @@
 	<button type="button" onclick={handleButtonClick}>Upload Torrent</button>
 	<input
 		bind:this={fileUploader}
+		bind:files
 		onchange={handleUpload}
 		accept="application/x-bittorrent"
 		id="torrentfile"
