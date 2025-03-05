@@ -157,11 +157,15 @@
 		line-height: 1.6;
 		background-color: #f4f4f4;
 		color: #333;
-		padding: 20px;
 	}
 
-	h1 {
+	h1,
+	h3 {
 		margin: auto;
+		padding: 2rem;
+	}
+
+	p {
 		padding: 2rem;
 	}
 
@@ -201,7 +205,7 @@
 
 	.status-bar {
 		width: 700px;
-		height: 25px;
+		height: 50px;
 		border: 1px solid rebeccapurple;
 	}
 
