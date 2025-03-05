@@ -8,6 +8,7 @@ import random
 import requests
 import signal
 import struct
+import sys
 import time
 
 from asyncio.streams import StreamReader, StreamWriter
@@ -485,12 +486,18 @@ async def main():
     logging.basicConfig(level=logging.INFO)
     logger.debug("Hello from torrentclient!")
 
+    if len(sys.argv) != 2:
+        logger.error(f"Usage: {sys.argv[0]} torrentfile.torrent")
+        sys.exit(1)
+
     manager = TorrentManager()
 
-    with open("./debian-12.9.0-amd64-netinst.iso.torrent", "rb") as f:
+    torrentfile = sys.argv[1]
+
+    with open(torrentfile, "rb") as f:
         torrent = manager.Add(f.read())
         await manager.Start(torrent)
-        
+
 
 if __name__ == "__main__":
     asyncio.run(main())
