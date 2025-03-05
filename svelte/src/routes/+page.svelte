@@ -3,6 +3,8 @@
 
 	let info_hash = $state("");
 
+	let fileUploader: HTMLInputElement;
+
 	// JSON typing is not trivial. https://github.com/microsoft/TypeScript/issues/1897
 	let status = $state.raw<any>();
 
@@ -52,6 +54,11 @@
 	};
 
 	const handleUpload = async () => {
+		if (fileUploader.files === null) {
+			return;
+		}
+		files = fileUploader.files;
+
 		if (!files) {
 			return;
 		}
@@ -60,13 +67,10 @@
 		formData.append("file", files[0]);
 
 		try {
-			const response = await fetch(
-				"http://localhost:8000/api/upload/",
-				{
-					method: "POST",
-					body: formData,
-				},
-			);
+			const response = await fetch("http://localhost:8000/api/upload/", {
+				method: "POST",
+				body: formData,
+			});
 
 			if (!response.ok) {
 				throw new Error("Upload failed");
@@ -79,16 +83,19 @@
 			console.error("Error");
 		}
 	};
+
+	const handleButtonClick = () => {
+		fileUploader.click();
+	};
 </script>
 
 <div class="container">
 	<h1>Welcome to Pytorrent</h1>
 
-	<label class="upload" for="torrentfile" onclick={handleUpload}
-		>Upload Torrent</label
-	>
+	<button type="button" onclick={handleButtonClick}>Upload Torrent</button>
 	<input
-		bind:files
+		bind:this={fileUploader}
+		onchange={handleUpload}
 		accept="application/x-bittorrent"
 		id="torrentfile"
 		name="torrentfile"
@@ -124,9 +131,7 @@
 				<li>
 					<strong>Percent complete:</strong>
 					{Math.round(
-						((status.size - status.left) /
-							status.size) *
-							10000,
+						((status.size - status.left) / status.size) * 10000,
 					) / 100}%
 				</li>
 				<li>
@@ -179,12 +184,11 @@
 		height: 100%;
 	}
 
-	label {
+	button {
 		background-color: rebeccapurple;
 		color: white;
 		padding: 0.75rem 1.5rem;
 		border-radius: 0.5rem;
-		cursor: pointer;
 		margin: auto;
 	}
 
