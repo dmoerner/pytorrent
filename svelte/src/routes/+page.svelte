@@ -17,6 +17,21 @@
 		}, 1000);
 	};
 
+	const getBarPositions = (
+		completed: Array<number>,
+		piece_count: number,
+		containerWidth: number,
+	): { x: number; barWidth: number }[] => {
+		const barWidth = containerWidth / piece_count;
+
+		return completed.map((piece) => {
+			return {
+				x: ((piece - 1) * barWidth) / containerWidth,
+				barWidth: barWidth,
+			};
+		});
+	};
+
 	const getStatus = async (info_hash: string) => {
 		try {
 			const response = await fetch(
@@ -66,38 +81,131 @@
 	};
 </script>
 
-<h1>Welcome to Pytorrent</h1>
+<div class="container">
+	<h1>Welcome to Pytorrent</h1>
 
-<h3>Torrent Upload</h3>
-<label>
-	Upload a torrent file:
+	<label class="upload" for="torrentfile" onclick={handleUpload}
+		>Upload Torrent</label
+	>
 	<input
 		bind:files
 		accept="application/x-bittorrent"
 		id="torrentfile"
 		name="torrentfile"
 		type="file"
+		hidden
 	/>
-</label>
-<button onclick={handleUpload} type="button" disabled={!!info_hash}
-	>Upload</button
->
 
-<h3>Download Status</h3>
-{#if status}
-	<ul>
-		<li>Name: {status.torrent_name}</li>
-		<li>
-			Percent complete: {Math.round(
-				((status.size - status.left) / status.size) *
-					10000,
-			) / 100}%
-		</li>
-		<li>Amount left: {status.left}</li>
-		<li>Completed pieces: {status.pieces}</li>
-		<li>Amount downloaded: {status.downloaded}</li>
-		<li>Amount uploaded: {status.uploaded}</li>
-	</ul>
-{:else}
-	<p>No download started, upload a file to begin.</p>
-{/if}
+	<div class="status">
+		<h3>Download Status</h3>
+		<div class="flex-center">
+			<div class="status-bar">
+				<svg viewBox="0 0 1 1">
+					{#if status}
+						{#each getBarPositions(status.pieces, status.piece_count, 700) as { x, barWidth }}
+							<rect
+								class="piece"
+								{x}
+								y="0"
+								width={barWidth}
+								height="1"
+							></rect>
+						{/each}
+					{/if}
+				</svg>
+			</div>
+		</div>
+		{#if status}
+			<ul>
+				<li>
+					<strong>Name:</strong>
+					{status.torrent_name}
+				</li>
+				<li>
+					<strong>Percent complete:</strong>
+					{Math.round(
+						((status.size - status.left) /
+							status.size) *
+							10000,
+					) / 100}%
+				</li>
+				<li>
+					<strong>Amount left:</strong>
+					{status.left}
+				</li>
+				<li>
+					<strong>Amount downloaded:</strong>
+					{status.downloaded}
+				</li>
+				<li>
+					<strong>Amount uploaded:</strong>
+					{status.uploaded}
+				</li>
+			</ul>
+		{:else}
+			<p>No download in progress, upload a file to begin.</p>
+		{/if}
+	</div>
+</div>
+
+<style>
+	* {
+		margin: 0;
+		padding: 0;
+		box-sizing: border-box;
+		font-family: Arial, sans-serif;
+		line-height: 1.6;
+		background-color: #f4f4f4;
+		color: #333;
+		padding: 20px;
+	}
+
+	h1 {
+		margin: auto;
+		padding: 2rem;
+	}
+
+	svg {
+		width: 100%;
+		height: 100%;
+	}
+
+	.piece {
+		fill: rebeccapurple;
+		height: 100%;
+	}
+
+	label {
+		background-color: rebeccapurple;
+		color: white;
+		padding: 0.75rem 1.5rem;
+		border-radius: 0.5rem;
+		cursor: pointer;
+		margin: auto;
+	}
+
+	.flex-center {
+		display: flex;
+		justify-content: center;
+	}
+
+	.container {
+		display: flex;
+		flex-direction: column;
+		min-height: 100vh;
+	}
+
+	.status {
+		flex-grow: 1;
+	}
+
+	.status-bar {
+		width: 700px;
+		height: 25px;
+		border: 1px solid rebeccapurple;
+	}
+
+	ul {
+		list-style-type: none;
+	}
+</style>
