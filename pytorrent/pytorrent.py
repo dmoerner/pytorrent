@@ -383,7 +383,7 @@ async def download_piece(piece_index: int, torrent: Torrent):
         logger.info(f"DEBUG: Banned peer for ConnectionRefused or Assertion Error {ip}, {port}")
         raise e
     except Exception as e:
-        logger.info(f"DEBUG: PIECE {piece_index} This is an unhandled exception when scoring peers: {e} {type(e)}")
+        logger.warning(f"DEBUG: PIECE {piece_index} This is an unhandled exception when scoring peers: {e} {type(e)}")
         async with torrent.peers_lock:
             heapq.heappush(torrent.peer_heap, (score + 1, peer))
         raise e

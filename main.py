@@ -1,3 +1,5 @@
+import logging
+
 from fastapi import FastAPI, UploadFile, BackgroundTasks, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -5,6 +7,8 @@ from fastapi.responses import JSONResponse
 from .pytorrent import pytorrent
 
 app = FastAPI()
+
+logging.basicConfig(level=logging.WARNING)
 
 manager = pytorrent.TorrentManager()
 
