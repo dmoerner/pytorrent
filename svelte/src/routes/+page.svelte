@@ -15,7 +15,7 @@
 	let status = $state.raw<any>();
 
 	const pollStatus = async () => {
-		const interval = setInterval(async () => {
+		setInterval(async () => {
 			if (info_hash === "") {
 				return;
 			}
@@ -46,14 +46,13 @@
 	const getBarPositions = (
 		completed: Array<number>,
 		piece_count: number,
-		containerWidth: number,
-	): { x: number; barWidth: number }[] => {
-		const barWidth = containerWidth / piece_count;
+	): { x: number; width: number }[] => {
+		const width = 1 / piece_count;
 
 		return completed.map((piece) => {
 			return {
-				x: ((piece - 1) * barWidth) / containerWidth,
-				barWidth: barWidth,
+				x: piece * width,
+				width: width,
 			};
 		});
 	};
@@ -110,12 +109,12 @@
 			<div class="status-bar">
 				<svg viewBox="0 0 1 1">
 					{#if status}
-						{#each getBarPositions(status.pieces, status.piece_count, 700) as { x, barWidth }}
+						{#each getBarPositions(status.pieces, status.piece_count) as piece}
 							<rect
 								class="piece"
-								{x}
+								x={piece.x}
 								y="0"
-								width={barWidth}
+								width={piece.width}
 								height="1"
 							></rect>
 						{/each}
@@ -158,9 +157,7 @@
 	* {
 		margin: 0;
 		padding: 0;
-		box-sizing: border-box;
 		font-family: Arial, sans-serif;
-		line-height: 1.6;
 		background-color: #f4f4f4;
 		color: #333;
 	}
@@ -173,16 +170,7 @@
 
 	p {
 		padding: 2rem;
-	}
-
-	svg {
-		width: 100%;
-		height: 100%;
-	}
-
-	.piece {
-		fill: rebeccapurple;
-		height: 100%;
+		line-height: 1.6;
 	}
 
 	button {
@@ -191,11 +179,6 @@
 		padding: 0.75rem 1.5rem;
 		border-radius: 0.5rem;
 		margin: auto;
-	}
-
-	.flex-center {
-		display: flex;
-		justify-content: center;
 	}
 
 	.container {
@@ -208,10 +191,24 @@
 		flex-grow: 1;
 	}
 
+	.flex-center {
+		display: flex;
+		justify-content: center;
+	}
+
 	.status-bar {
 		width: 700px;
-		height: 50px;
+		height: 70px;
 		border: 1px solid rebeccapurple;
+	}
+
+	svg {
+		width: 100%;
+		height: 100%;
+	}
+
+	.piece {
+		fill: rebeccapurple;
 	}
 
 	ul {
