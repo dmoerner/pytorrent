@@ -47,7 +47,7 @@
 		completed: Array<number>,
 		piece_count: number,
 	): { x: number; width: number }[] => {
-		const width = 1 / piece_count;
+		const width = 700 / piece_count;
 
 		return completed.map((piece) => {
 			return {
@@ -107,7 +107,7 @@
 		<h3>Download Status</h3>
 		<div class="flex-center">
 			<div class="status-bar">
-				<svg viewBox="0 0 1 1">
+				<svg viewBox="0 0 700 70">
 					{#if status}
 						{#each getBarPositions(status.pieces, status.piece_count) as piece}
 							<rect
@@ -115,7 +115,7 @@
 								x={piece.x}
 								y="0"
 								width={piece.width}
-								height="1"
+								height="70"
 							></rect>
 						{/each}
 					{/if}
