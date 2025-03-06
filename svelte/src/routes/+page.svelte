@@ -1,23 +1,47 @@
 <script lang="ts">
+	import { browser } from "$app/environment";
+
 	let files = $state<FileList>();
 
 	let info_hash = $state("");
+
+	if (browser) {
+		info_hash = localStorage.getItem("info_hash") || "";
+	}
 
 	let fileUploader: HTMLInputElement;
 
 	// JSON typing is not trivial. https://github.com/microsoft/TypeScript/issues/1897
 	let status = $state.raw<any>();
 
-	const pollStatus = async (info_hash: string) => {
+	const pollStatus = async () => {
 		const interval = setInterval(async () => {
+			if (info_hash === "") {
+				return;
+			}
 			try {
-				getStatus(info_hash);
+				const response = await fetch(
+					`http://localhost:8000/api/status/${info_hash}`,
+				);
+
+				if (!response.ok) {
+					throw new Error("Get status failed");
+				}
+
+				const data = await response.json();
+
+				status = data;
 			} catch (error) {
-				console.error("error polling for updates");
-				clearInterval(interval);
+				console.error(
+					"error connecting to backend, clearing localStorage for current operations",
+				);
+				info_hash = "";
+				localStorage.setItem("info_hash", info_hash);
 			}
 		}, 1000);
 	};
+
+	pollStatus();
 
 	const getBarPositions = (
 		completed: Array<number>,
@@ -32,25 +56,6 @@
 				barWidth: barWidth,
 			};
 		});
-	};
-
-	const getStatus = async (info_hash: string) => {
-		try {
-			const response = await fetch(
-				`http://localhost:8000/api/status/${info_hash}`,
-			);
-
-			if (!response.ok) {
-				throw new Error("Get status failed");
-			}
-
-			const data = await response.json();
-
-			status = data;
-		} catch (error) {
-			console.error(error);
-			throw error;
-		}
 	};
 
 	const handleUpload = async () => {
@@ -73,7 +78,7 @@
 
 			const data = await response.json();
 			info_hash = data.info_hash;
-			pollStatus(info_hash);
+			localStorage.setItem("info_hash", info_hash);
 		} catch (error) {
 			console.error("Error");
 		}
@@ -211,5 +216,9 @@
 
 	ul {
 		list-style-type: none;
+	}
+
+	li {
+		padding: 0.5rem;
 	}
 </style>
