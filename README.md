@@ -35,7 +35,8 @@ Pytorrent requires `uv` (for Python) and `npm` (for Svelte)
 First, clone this repository and start the backend:
 
 ```bash
- $ git clone https://github.com/dmoerner/pytorrent && cd pytorrent
+ $ git clone https://github.com/dmoerner/pytorrent
+ $ cd pytorrent
  $ uv run fastapi dev
 ```
 
@@ -43,6 +44,7 @@ Then, in another terminal enter the frontend "svelte" directory and start the fr
 
 ```bash
 $ cd svelte
+$ npm i
 $ npm run dev
 ```
 
