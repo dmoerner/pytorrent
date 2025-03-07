@@ -49,3 +49,14 @@ $ npm run dev
 ```
 
 The application will now be available on `http://localhost:5173`
+
+# Further Discussion
+
+- A blog post on how the Svelte frontend implements an accessible, idiomatic
+  single-click upload button: https://moerner.com/posts/svelte-file-upload-button/
+
+# Further Resources
+
+- The BitTorrent Protocol Specification: https://www.bittorrent.org/beps/bep_0003.html
+- BitTorrent Protocol Specification v1.0: https://wiki.theory.org/BitTorrentSpecification
+
