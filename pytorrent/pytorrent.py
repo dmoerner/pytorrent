@@ -63,7 +63,8 @@ class Torrent:
         self.piece_count = math.ceil(self.file_size / self.piece_length)
 
 
-        # Progress information, including locks.
+        # Download properties, including locks.
+        self.tg = asyncio.TaskGroup()
         self.uploaded = 0
         self.downloaded = 0
 
@@ -110,18 +111,36 @@ class Torrent:
             logger.info(f"Peer list: {self.peer_list}")
 
 
-    async def Download(self):
+    async def Start(self):
         sem = asyncio.Semaphore(WORKER_COUNT)
         await self.Announce(event="started")
 
-        async with asyncio.TaskGroup() as tg:
-            for piece_index in range(self.piece_count):
-                if piece_index not in self.pieces:
-                    tg.create_task(event_handler(piece_index, self, sem))
+        async with self.tg:
+            try:
+                for piece_index in range(self.piece_count):
+                    if piece_index not in self.pieces:
+                        self.tg.create_task(event_handler(piece_index, self, sem))
+            except asyncio.CancelledError:
+                logger.info("Torrent stopped")
+            finally:
+                await self.closeConnections()
         logger.info("All events processed.")
 
         await self.Announce(event="completed", numwant=0)
 
+    async def Stop(self):
+        for task in self.tg._tasks:
+            task.cancel()
+        self.peer_heap = []
+        self.peer_list = []
+        await self.Announce(event="stopped", numwant=0)
+
+
+    async def closeConnections(self):
+        for _, writer in self.peers_socket_streams:
+            writer.close()
+            await writer.wait_closed()
+        self.peers_socket_streams = {}
 
 class TorrentManager:
     """
@@ -142,7 +161,10 @@ class TorrentManager:
         return torrent.info_hashhex
 
     async def Start(self, info_hash: str):
-        await self.torrents[info_hash].Download()
+        await self.torrents[info_hash].Start()
+
+    async def Stop(self, info_hash: str):
+        await self.torrents[info_hash].Stop()
 
     def Get(self, info_hash: str) -> dict | None:
         if info_hash not in self.torrents:
@@ -355,11 +377,11 @@ async def download_piece(piece_index: int, torrent: Torrent):
             score, peer = heapq.heappop(torrent.peer_heap)
     try:
         start = time.time()
-        
+
         peer_ip, peer_port = extract_peer(peer)
         reader, writer = await handshake(peer_ip, peer_port, torrent)
         logger.info(f"PEER_IP: {peer_ip}, PEER_PORT: {peer_port}, PIECE_INDEX: {piece_index}")
-        
+
         data = await request_piece(piece_index, torrent, reader, writer)
         end = time.time()
         speed = len(data) // (end - start)
@@ -413,6 +435,8 @@ async def event_handler(
                 return True
             except TimeoutError:
                 logger.debug(f"Piece Index: {piece_index}: Timeout on attempt {attempt + 1}")
+            except asyncio.CancelledError:
+                raise
             except Exception as e:
                 logger.debug(
                     f"Piece Index: {piece_index}: An error of type {type(e).__name__} occurred - {e}"
@@ -496,8 +520,8 @@ async def main():
     torrentfile = sys.argv[1]
 
     with open(torrentfile, "rb") as f:
-        torrent = manager.Add(f.read())
-        await manager.Start(torrent)
+        info_hash = manager.Add(f.read())
+        await manager.Start(info_hash)
 
 
 if __name__ == "__main__":
