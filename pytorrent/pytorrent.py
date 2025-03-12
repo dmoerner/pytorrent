@@ -71,7 +71,7 @@ class Torrent:
         # by the files lock and only updated when a piece is written to disk.
         self.file_lock = asyncio.Lock()
         self.left = self.file_size
-        self.pieces = []
+        self.pieces = set()
 
         # The peers list and heap must be protected by the peers lock.
         self.peers_lock = asyncio.Lock()
@@ -116,7 +116,8 @@ class Torrent:
 
         async with asyncio.TaskGroup() as tg:
             for piece_index in range(self.piece_count):
-                tg.create_task(event_handler(piece_index, self, sem))
+                if piece_index not in self.pieces:
+                    tg.create_task(event_handler(piece_index, self, sem))
         logger.info("All events processed.")
 
         await self.Announce(event="completed", numwant=0)
@@ -151,7 +152,7 @@ class TorrentManager:
             "torrent_name": torrent.torrent_info[b"name"].decode(),
             "size": torrent.file_size,
             "left": torrent.left,
-            "pieces": torrent.pieces,
+            "pieces": list(torrent.pieces),
             "piece_count": torrent.piece_count,
             "uploaded": torrent.uploaded,
             "downloaded": torrent.downloaded,
@@ -322,7 +323,7 @@ async def write_piece_to_disk(piece_index: int, torrent: Torrent, data: bytes):
             f.write(data)
             torrent.left -= piece_size
             torrent.downloaded += piece_size
-            torrent.pieces.append(piece_index)
+            torrent.pieces.add(piece_index)
     logger.debug(f"DEBUG: Done writing piece {piece_index}")
 
 
