@@ -5,6 +5,8 @@
 
 	let info_hash = $state("");
 
+	let started = $state(false);
+
 	if (browser) {
 		info_hash = localStorage.getItem("info_hash") || "";
 	}
@@ -77,13 +79,64 @@
 
 			const data = await response.json();
 			info_hash = data.info_hash;
+			started = true;
 			localStorage.setItem("info_hash", info_hash);
 		} catch (error) {
 			console.error("Error");
 		}
 	};
 
-	const handleButtonClick = () => {
+	const startTorrent = async () => {
+		try {
+			const response = await fetch(
+				`http://localhost:8000/api/start/${info_hash}`,
+				{
+					method: "POST",
+				},
+			);
+
+			if (!response.ok) {
+				throw new Error("Start failed");
+			}
+
+			started = true;
+		} catch (error) {
+			console.error("Error");
+		}
+	};
+
+	const stopTorrent = async () => {
+		try {
+			const response = await fetch(
+				`http://localhost:8000/api/stop/${info_hash}`,
+				{
+					method: "POST",
+				},
+			);
+
+			if (!response.ok) {
+				throw new Error("Stop failed");
+			}
+
+			started = false;
+		} catch (error) {
+			console.error("Error");
+		}
+		started = false;
+	};
+
+	const handleButtonClick = async () => {
+		if (status) {
+			if (
+				confirm(
+					`Already downloading: ${status.torrent_name}. Adding a new torrent will cancel that download. Are you sure you want to continue?`,
+				)
+			) {
+				await stopTorrent();
+			} else {
+				return;
+			}
+		}
 		fileUploader.click();
 	};
 </script>
@@ -121,35 +174,45 @@
 					{/if}
 				</svg>
 			</div>
+			{#if status}
+				{#if started}
+					<button type="button" onclick={stopTorrent}>Stop</button>
+				{:else}
+					<button type="button" onclick={startTorrent}>Restart</button
+					>
+				{/if}
+			{/if}
 		</div>
-		{#if status}
-			<ul>
-				<li>
-					<strong>Name:</strong>
-					{status.torrent_name}
-				</li>
-				<li>
-					<strong>Percent complete:</strong>
-					{Math.round(
-						((status.size - status.left) / status.size) * 10000,
-					) / 100}%
-				</li>
-				<li>
-					<strong>Amount left:</strong>
-					{status.left}
-				</li>
-				<li>
-					<strong>Amount downloaded:</strong>
-					{status.downloaded}
-				</li>
-				<li>
-					<strong>Amount uploaded:</strong>
-					{status.uploaded}
-				</li>
-			</ul>
-		{:else}
-			<p>No download in progress, upload a file to begin.</p>
-		{/if}
+		<div class="status-box">
+			{#if status}
+				<ul>
+					<li>
+						<strong>Name:</strong>
+						{status.torrent_name}
+					</li>
+					<li>
+						<strong>Percent complete:</strong>
+						{Math.round(
+							((status.size - status.left) / status.size) * 10000,
+						) / 100}%
+					</li>
+					<li>
+						<strong>Amount left:</strong>
+						{status.left}
+					</li>
+					<li>
+						<strong>Amount downloaded:</strong>
+						{status.downloaded}
+					</li>
+					<li>
+						<strong>Amount uploaded:</strong>
+						{status.uploaded}
+					</li>
+				</ul>
+			{:else}
+				<p>No download in progress, upload a file to begin.</p>
+			{/if}
+		</div>
 	</div>
 </div>
 
@@ -185,13 +248,15 @@
 
 	.flex-center {
 		display: flex;
-		justify-content: center;
+		flex-direction: column;
+		align-items: center;
 	}
 
 	.status-bar {
 		width: 700px;
 		height: 70px;
 		border: 1px solid rebeccapurple;
+		margin: 1rem;
 	}
 
 	svg {
@@ -201,6 +266,10 @@
 
 	.piece {
 		fill: rebeccapurple;
+	}
+
+	.status-box {
+		padding: 1rem;
 	}
 
 	ul {

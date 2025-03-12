@@ -129,15 +129,20 @@ class Torrent:
         await self.Announce(event="completed", numwant=0)
 
     async def Stop(self):
+        """
+        Cancel tasks (which closes connections), clear peer lists,
+        reset the task group, and send a clean-up announce.
+        """
         for task in self.tg._tasks:
             task.cancel()
         self.peer_heap = []
         self.peer_list = []
+        self.tg = asyncio.TaskGroup()
         await self.Announce(event="stopped", numwant=0)
 
 
     async def closeConnections(self):
-        for _, writer in self.peers_socket_streams:
+        for _, writer in self.peers_socket_streams.values():
             writer.close()
             await writer.wait_closed()
         self.peers_socket_streams = {}
@@ -166,9 +171,13 @@ class TorrentManager:
     async def Stop(self, info_hash: str):
         await self.torrents[info_hash].Stop()
 
-    def Get(self, info_hash: str) -> dict | None:
-        if info_hash not in self.torrents:
-            return None
+    def Search(self, info_hash: str) -> bool:
+        return info_hash in self.torrents
+
+    def Get(self, info_hash: str) -> dict:
+        """
+        Get is only called after a successful search.
+        """
         torrent = self.torrents[info_hash]
         response = {
             "torrent_name": torrent.torrent_info[b"name"].decode(),

@@ -14,14 +14,15 @@ Implemented Features:
 - Svelte Web front-end for easy uploading of `.torrent` files and viewing
   download progress. Includes a dynamically-generated SVG status bar to track each
   piece as it completes.
+- Supports starting and stopping torrents.
 
 Feature Roadmap:
 
 - Support downloading of torrent files which consist of directories, rather
   than only single-file torrents.
 - Support seeding torrents.
-- Support starting and stopping torrents.
 - Support multiple simultaneous downloads in the front-end.
+- Respect optional tracker "min interval" key.
 - Simplify installation and deployment.
 
 # Installation
