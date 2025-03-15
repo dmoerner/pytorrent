@@ -72,13 +72,13 @@ class Torrent:
         # by the files lock and only updated when a piece is written to disk.
         self.file_lock = asyncio.Lock()
         self.left = self.file_size
-        self.pieces = set()
+        self.pieces: set[int] = set()
 
         # The peers list and heap must be protected by the peers lock.
         self.peers_lock = asyncio.Lock()
-        self.peer_list = []
-        self.peer_heap = []
-        self.peers_socket_streams = {}
+        self.peer_list: list[bytes] = []
+        self.peer_heap: list[tuple[int, bytes]] = []
+        self.peers_socket_streams: dict[tuple[str, int], tuple[StreamReader, StreamWriter]] = {}
 
 
     async def Announce(self, event="empty", numwant=50, left=None):
@@ -304,10 +304,10 @@ async def handshake(
 
     assert (
         payload_header == handshake_header
-    ), f"payload header = {payload_header}, handshake header = {handshake_header}"
+    ), f"payload header = {payload_header!r}, handshake header = {handshake_header!r}"
     assert (
         torrent.info_hash == handshake_info_hash
-    ), f"info_hash = {torrent.info_hash} handshake info hash = {handshake_info_hash}"
+    ), f"info_hash = {torrent.info_hash!r} handshake info hash = {handshake_info_hash!r}"
 
     bitfield = await handle_recv(reader)
     _ = bitfield
@@ -393,7 +393,7 @@ async def download_piece(piece_index: int, torrent: Torrent):
 
         data = await request_piece(piece_index, torrent, reader, writer)
         end = time.time()
-        speed = len(data) // (end - start)
+        speed = len(data) // int(end - start)
         ip, port = extract_peer(peer)
         logger.info(f"DEBUG: Good peer {ip}, {port}")
         async with torrent.peers_lock:

@@ -11,3 +11,7 @@ dependencies = [
     "ruff>=0.9.3",
     "starlette>=0.45.3",
 ]
+
+[[tool.mypy.overrides]]
+module = ["bencoder.*"]
+follow_untyped_imports = true
