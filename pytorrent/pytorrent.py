@@ -59,7 +59,11 @@ class Torrent:
         self.info_hash = sha1(bencoder.encode(self.torrent_info)).digest()
         self.info_hashhex = sha1(bencoder.encode(self.torrent_info)).hexdigest()
         self.piece_length = self.torrent_info[b"piece length"]
-        self.file_size = self.torrent_info[b"length"]
+        self.multifile = b"length" not in self.torrent_info
+        if self.multifile:
+            self.file_size = sum(file[b"length"] for file in self.torrent_info[b"files"])
+        else:
+            self.file_size = self.torrent_info[b"length"]
         self.piece_count = math.ceil(self.file_size / self.piece_length)
 
 
@@ -205,7 +209,8 @@ class MessageType(IntEnum):
 
 def decode_torrentfile(file: bytes) -> dict:
     """
-    Given a torrent file in bytes, return a bdecoded dict. Sample output:
+    Given a torrent file in bytes, return a bdecoded dict. Sample output
+    for single file torrent:
 
     {b'announce': b'http://localhost:8080/announce',
     b'created by': b'mktorrent 1.1',
@@ -216,6 +221,22 @@ def decode_torrentfile(file: bytes) -> dict:
         b'pieces': b'"Ycc\xb3\xde@\xb0o\x98\x1f\xb8]\x821.\x8c\x0e\xd5\x11',
         b'private': 1}
     }
+
+    Sample output for multi-file torrent:
+
+    {b'created by': b'mktorrent 1.1',
+     b'creation date': 1742305570,
+     b'info': {b'files': [{b'length': 2, b'path': [b'1.txt']},
+                          {b'length': 2, b'path': [b'subdir', b'2.txt']},
+                          {b'length': 2, b'path': [b'subdir', b'5.txt']},
+                          {b'length': 2,
+                           b'path': [b'subdir', b'subsubdir', b'3.txt']},
+                          {b'length': 2,
+                           b'path': [b'subdir', b'subsubdir', b'4.txt']}],
+               b'name': b'torrentdir',
+               b'piece length': 262144,
+               b'pieces': b'\x00\xa6\x90\xbb\x94we\x0e\xab\x11\xce\xfa'
+                          b'\x0f\x08\xd8\xab"\xa4\xf2\x01'}}
     """
     decoded = bencoder.decode(file)
     if not isinstance(decoded, dict):
@@ -340,7 +361,17 @@ def verify_piece_hash(piece_index: int, torrent: Torrent, piece_hash: bytes) -> 
 
 async def write_piece_to_disk(piece_index: int, torrent: Torrent, data: bytes):
     """
-    Write a piece to disc. This uses write_lock.
+    Write a piece to disc. Dispatch to appropriate helper function.
+    """
+    if torrent.multifile:
+        await write_piece_multifile(piece_index, torrent, data)
+    else:
+        await write_piece_singlefile(piece_index, torrent, data)
+
+
+async def write_piece_singlefile(piece_index: int, torrent: Torrent, data: bytes):
+    """
+    Write to a single-file torrent. This holds a lock on the file.
     """
     piece_length = torrent.torrent_info[b"piece length"]
     output_file = torrent.torrent_info[b"name"]
@@ -356,6 +387,20 @@ async def write_piece_to_disk(piece_index: int, torrent: Torrent, data: bytes):
             torrent.downloaded += piece_size
             torrent.pieces.add(piece_index)
     logger.debug(f"DEBUG: Done writing piece {piece_index}")
+
+async def write_piece_multifile(piece_index: int, torrent: Torrent, data: bytes):
+    """
+    Torrents may have multiple files organized in directories. Aligning files on
+    piece boundaries is only optional and cannot be assumed. Therefore, to
+    determine which file to write, we must index into the correct location in
+    the files dict. We must close files that are finished, and seek to the
+    correct location in files that were started in a previous piece. We must
+    also create any directories.
+
+    For now, this will probably be implemented with a single lock for the entire
+    torrent, but it should be possible to move to per-file locks.
+    """
+    pass
 
 
 async def download_piece(piece_index: int, torrent: Torrent):
